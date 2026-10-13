@@ -9,7 +9,7 @@ plugins {
 android {
     namespace = "io.github.peerless2012.ass"
     compileSdk = 36
-    ndkVersion = "28.1.13356709"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdk = 21
