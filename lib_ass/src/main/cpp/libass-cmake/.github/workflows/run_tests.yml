@@ -1,0 +1,55 @@
+name: Run Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_call:
+
+jobs:
+  run-tests:
+    name: "Test (${{ matrix.ANDROID_ABI }})"
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        ANDROID_ABI: ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Run setup-libraries composite action
+      uses: ./.github/actions/setup-libraries
+      with:
+        libass-cmake-path: ${{ github.workspace }}
+
+    - name: Create build directory
+      run: mkdir build
+
+    - name: Configure CMake
+      working-directory: build
+      run: |
+        cmake \
+        -DANDROID_ABI=${{ matrix.ANDROID_ABI }} \
+        -DANDROID_PLATFORM=android-21 \
+        -DANDROID_NDK=${ANDROID_NDK_ROOT} \
+        -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake \
+        -G Ninja \
+        ..
+
+    - name: Build
+      working-directory: build
+      run: cmake --build .
+
+    - uses: actions/upload-artifact@v5
+      with:
+        name: build-${{ matrix.ANDROID_ABI }}
+        path: |
+          build/etc/
+          build/include/
+          build/lib/
+          build/share/

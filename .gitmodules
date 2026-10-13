@@ -1,4 +1,18 @@
-[submodule "lib_ass/src/main/cpp/libass-cmake"]
-	path = lib_ass/src/main/cpp/libass-cmake
-	url = https://github.com/peerless2012/libass-cmake.git
-	ignore = dirty
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/unibreak"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/unibreak
+	url = https://github.com/adah1972/libunibreak.git
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/harfbuzz"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz.git
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/fribidi"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/fribidi
+	url = https://github.com/fribidi/fribidi.git
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/freetype"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/freetype
+	url = https://gitlab.freedesktop.org/freetype/freetype.git
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/fontconfig"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/fontconfig
+	url = https://gitlab.freedesktop.org/fontconfig/fontconfig
+[submodule "lib_ass/src/main/cpp/libass-cmake/src/expat"]
+	path = lib_ass/src/main/cpp/libass-cmake/src/expat
+	url = https://github.com/libexpat/libexpat.git

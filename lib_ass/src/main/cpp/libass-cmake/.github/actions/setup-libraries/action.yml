@@ -1,0 +1,37 @@
+name: Setup Libraries
+description: Runs autogen.sh in required folders
+inputs:
+  libass-cmake-path:
+    description: Path of libass-cmake repos
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      run: sudo apt install gperf gettext autopoint
+      shell: bash
+
+    - name: Running autogen.sh in unibreak
+      working-directory: ${{ inputs.libass-cmake-path }}/src/unibreak
+      run: NOCONFIGURE=1 ./autogen.sh
+      shell: bash
+
+    - name: Running autogen.sh in fribidi
+      working-directory: ${{ inputs.libass-cmake-path }}/src/fribidi
+      run: NOCONFIGURE=1 ./autogen.sh
+      shell: bash
+
+    - name: Running autogen.sh in fontconfig
+      working-directory: ${{ inputs.libass-cmake-path }}/src/fontconfig
+      run: NOCONFIGURE=1 ./autogen.sh
+      shell: bash
+
+    - name: Running autogen.sh in ass
+      working-directory: ${{ inputs.libass-cmake-path }}/src/ass
+      run: ./autogen.sh
+      shell: bash
+
+    - name: Running buildconf.sh in expat
+      working-directory: ${{ inputs.libass-cmake-path }}/src/expat/expat
+      run: ./buildconf.sh
+      shell: bash
