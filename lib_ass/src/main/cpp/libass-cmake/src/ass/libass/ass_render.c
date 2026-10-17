@@ -2062,8 +2062,10 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
     ParsedEvent *parsed = ass_cache_get(render_priv->cache.parsed_event_cache,
                                         &key, render_priv);
     size_t run_index = 0;
-    if (parsed && !parsed->valid)
-        parsed = NULL;
+    if (!parsed || (!parsed->runs && *p))
+        parsed = ass_lex_event(render_priv, p, key.text.len);
+    if (!parsed)
+        return false;
 
     // Event parsing.
     while (true) {
@@ -2074,40 +2076,18 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
         unsigned code = 0;
         while (*p) {
             const ParsedTextRun *run = NULL;
-            if (parsed && (*p == '{' || state->drawing_scale)) {
+            if (*p == '{' || state->drawing_scale) {
                 size_t offset = p - event->Text;
                 while (run_index < parsed->n_runs && parsed->runs[run_index].end <= offset)
                     run_index++;
                 if (run_index < parsed->n_runs)
                     run = &parsed->runs[run_index];
             }
-            q = NULL;
-            if (*p == '{') {
-                if (parsed) {
-                    if (run && run->override_end != SIZE_MAX)
-                        q = event->Text + run->override_end;
-                } else
-                    q = strchr(p, '}');
-            }
-            if (q) {
-                if (parsed) {
-                    ass_apply_tags(state, event->Text, parsed, run);
-                    p = event->Text + run->override_end + 1;
-                } else {
-                    p = ass_parse_tags(state, p, q, 1., false);
-                    assert(*p == '}');
-                    p++;
-                }
+            if (*p == '{' && run && run->override_end != SIZE_MAX) {
+                ass_apply_tags(state, event->Text, parsed, run);
+                p = event->Text + run->override_end + 1;
             } else if (state->drawing_scale) {
-                if (parsed)
-                    q = event->Text + run->end;
-                else {
-                    q = p;
-                    if (*p == '{')
-                        q++;
-                    while ((*q != '{') && (*q != 0))
-                        q++;
-                }
+                q = event->Text + run->end;
                 drawing_text.str = p;
                 drawing_text.len = q - p;
                 code = 0xfffc; // object replacement character

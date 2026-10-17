@@ -452,7 +452,7 @@ static bool lex_tag(char **cursor, char **after, char *end,
 }
 
 static bool lex_tags(ParsedEvent *parsed, char *text, char *p, char *end,
-                     bool nested)
+                     bool *drawing)
 {
     size_t tail_parent = SIZE_MAX;
     char *q;
@@ -485,18 +485,18 @@ static bool lex_tags(ParsedEvent *parsed, char *text, char *p, char *end,
                 .start = args[i].start - text, .end = args[i].end - text,
             };
         }
+        if (id == TAG_P)
+            *drawing = argtoi32(*args) > 0;
         int cnt = nargs - 1;
         if (id == TAG_T && cnt >= 0 && cnt <= 3 && has_backslash_arg) {
             if (args[cnt].end < end) {
-                // Such a nested transform asserts in the uncached parser.
-                if (nested || !lex_tags(parsed, text, args[cnt].start, args[cnt].end, true))
+                if (!lex_tags(parsed, text, args[cnt].start, args[cnt].end, drawing))
                     return false;
                 parsed->tags[index].next = parsed->n_tags;
             } else {
                 // Tail transforms share the enclosing range and must not recurse.
                 parsed->tags[index].next = tail_parent;
                 tail_parent = index;
-                nested = true;
                 q = args[cnt].start;
             }
         }
@@ -520,51 +520,60 @@ void ass_parsed_event_scratch_free(ParsedEvent *parsed)
     free(parsed);
 }
 
-size_t ass_parsed_event_construct(void *key, void *value, void *priv)
+ParsedEvent *ass_lex_event(ASS_Renderer *renderer, char *text, size_t len)
 {
-    ParsedEventKey *k = key;
-    ParsedEvent *result = value;
-    ASS_Renderer *renderer = priv;
-    *result = (ParsedEvent) {0};
     if (!renderer->parsed_event_scratch)
         renderer->parsed_event_scratch = calloc(1, sizeof(ParsedEvent));
     ParsedEvent *parsed = renderer->parsed_event_scratch;
     if (!parsed)
-        goto fail;
+        return NULL;
     parsed->n_tags = parsed->n_args = parsed->n_runs = 0;
-    char *text = (char *) k->text.str;
+    bool drawing = false;
     char *p = text, *close = strchr(text, '}');
     while (*p) {
         if (parsed->n_runs == parsed->max_runs) {
             size_t count = parsed->max_runs ? parsed->max_runs * 2 : PARSED_EVENT_INITIAL_CAPACITY;
             if (count < parsed->max_runs || !ASS_REALLOC_ARRAY(parsed->runs, count))
-                goto fail;
+                return NULL;
             parsed->max_runs = count;
         }
-        if (*p == '{' && close && close < p)
-            close = strchr(p, '}');
-        // Escaped braces are literal in text but open overrides in drawings.
-        if (*p == '{' && close && p > text && p[-1] == '\\' &&
-            memchr(p + 1, '{', close - p - 1))
-            goto fail;
-        char *q = strchr(*p == '{' && close ? close + 1 : p + (*p == '{'), '{');
-        if (!q)
-            q = text + k->text.len;
         ParsedTextRun run = {
-            .start = p - text, .end = q - text, .override_end = SIZE_MAX,
+            .start = p - text, .override_end = SIZE_MAX,
             .first = parsed->n_tags,
         };
+        char *q = p;
         if (*p == '{') {
+            if (close && close < p)
+                close = strchr(p, '}');
             if (close) {
                 run.override_end = close - text;
-                if (!lex_tags(parsed, text, p, close, false))
-                    goto fail;
-            }
+                if (!lex_tags(parsed, text, p, close, &drawing))
+                    return NULL;
+                q = close + 1;
+            } else
+                q++;
         }
+        while (q < text + len && *q != '{') {
+            if (!drawing && *q == '\\' && (q[1] == '{' || q[1] == '}'))
+                q++;
+            q++;
+        }
+        run.end = q - text;
         run.last = parsed->n_tags;
         parsed->runs[parsed->n_runs++] = run;
         p = q;
     }
+    return parsed;
+}
+
+size_t ass_parsed_event_construct(void *key, void *value, void *priv)
+{
+    ParsedEventKey *k = key;
+    ParsedEvent *result = value;
+    *result = (ParsedEvent) {0};
+    ParsedEvent *parsed = ass_lex_event(priv, (char *) k->text.str, k->text.len);
+    if (!parsed)
+        goto fail;
     size_t tags_size = parsed->n_tags * sizeof(*parsed->tags);
     size_t args_size = parsed->n_args * sizeof(*parsed->args);
     size_t runs_size = parsed->n_runs * sizeof(*parsed->runs);
@@ -594,7 +603,6 @@ size_t ass_parsed_event_construct(void *key, void *value, void *priv)
         if (runs_size)
             memcpy(result->runs, parsed->runs, runs_size);
     }
-    result->valid = true;
     return sizeof(*k) + sizeof(*result) + k->text.len + 1 + size;
 
 fail:
@@ -608,31 +616,23 @@ static char *apply_tags(RenderContext *state, char *text, char *p, char *end,
     ASS_Renderer *render_priv = state->renderer;
     size_t next = first;
     char *q = p;
-    while (parsed ? next < last : p < end) {
+    while (next < last) {
         struct arg args[MAX_VALID_NARGS + 1];
-        int nargs;
-        bool has_backslash_arg;
-        enum ass_tag_id id;
         size_t current = next;
-        const ParsedTag *record = NULL;
-        if (parsed) {
-            q = end;
-            record = &parsed->tags[current];
-            next = record->next;
-            id = record->id;
-            nargs = record->nargs;
-            has_backslash_arg = record->has_backslash_arg;
-            args[0] = (struct arg) { .start = "", .end = "" };
-            for (int i = 0; i < nargs; i++) {
-                ParsedTagArg *arg = &parsed->args[record->args + i];
-                args[i] = (struct arg) {
-                    .start = text + arg->start, .end = text + arg->end,
-                    .cached = arg,
-                };
-            }
-        } else if (!lex_tag(&p, &q, end, args, &nargs,
-                            &has_backslash_arg, &id))
-            break;
+        const ParsedTag *record = &parsed->tags[current];
+        next = record->next;
+        enum ass_tag_id id = record->id;
+        int nargs = record->nargs;
+        bool has_backslash_arg = record->has_backslash_arg;
+        q = end;
+        args[0] = (struct arg) { .start = "", .end = "" };
+        for (int i = 0; i < nargs; i++) {
+            ParsedTagArg *arg = &parsed->args[record->args + i];
+            args[i] = (struct arg) {
+                .start = text + arg->start, .end = text + arg->end,
+                .cached = arg,
+            };
+        }
         // New tags introduced in vsfilter 2.39
         switch (id) {
         case TAG_XBORD:
@@ -1076,12 +1076,8 @@ static char *apply_tags(RenderContext *state, char *text, char *p, char *end,
             p = args[cnt].start;
             if (args[cnt].end < end) {
                 assert(!nested);
-                if (parsed)
-                    apply_tags(state, text, p, args[cnt].end, k, true,
-                               parsed, current + 1, record->next);
-                else
-                    apply_tags(state, text, p, args[cnt].end, k, true,
-                               NULL, 0, 0);
+                apply_tags(state, text, p, args[cnt].end, k, true,
+                           parsed, current + 1, record->next);
             } else {
                 assert(q == end);
                 // No other tags can possibly follow this \t tag,
@@ -1091,8 +1087,7 @@ static char *apply_tags(RenderContext *state, char *text, char *p, char *end,
                 pwr = k;
                 nested = true;
                 q = p;
-                if (parsed)
-                    next = current + 1;
+                next = current + 1;
             }
             break;
         }
@@ -1365,19 +1360,6 @@ next_tag:
         p = q;
     }
     return end;
-}
-
-/**
- * \brief Parse style override tags.
- * \param p string to parse
- * \param end end of string to parse, which must be '}', ')', or the first
- *            of a number of spaces immediately preceding '}' or ')'
- * \param pwr multiplier for some tag effects (comes from \t tags)
- */
-char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
-                     bool nested)
-{
-    return apply_tags(state, p, p, end, pwr, nested, NULL, 0, 0);
 }
 
 void ass_apply_tags(RenderContext *state, char *text, const ParsedEvent *parsed,

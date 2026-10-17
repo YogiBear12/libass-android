@@ -114,11 +114,11 @@ typedef struct parsed_event {
     ParsedTagArg *args;
     ParsedTextRun *runs;
     size_t n_tags, max_tags, n_args, max_args, n_runs, max_runs;
-    bool valid;
 } ParsedEvent;
 
 void ass_apply_tags(RenderContext *state, char *text, const ParsedEvent *parsed,
                     const ParsedTextRun *run);
+ParsedEvent *ass_lex_event(ASS_Renderer *renderer, char *text, size_t len);
 size_t ass_parsed_event_construct(void *key, void *value, void *priv);
 void ass_parsed_event_scratch_free(ParsedEvent *parsed);
 
@@ -126,8 +126,6 @@ void ass_update_font(RenderContext *state);
 void ass_apply_transition_effects(RenderContext *state);
 void ass_process_karaoke_effects(RenderContext *state);
 unsigned ass_get_next_char(RenderContext *state, char **str);
-char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
-                     bool nested);
 int ass_event_has_hard_overrides(char *str);
 void ass_apply_fade(uint32_t *clr, int fade);
 
