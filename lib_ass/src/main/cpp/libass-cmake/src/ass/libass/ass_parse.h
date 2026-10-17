@@ -28,6 +28,100 @@
 #define _b(c)   (((c) >> 8) & 0xFF)
 #define _a(c)   ((c) & 0xFF)
 
+enum ass_tag_id {
+    TAG_UNKNOWN,
+    TAG_XBORD,
+    TAG_YBORD,
+    TAG_XSHAD,
+    TAG_YSHAD,
+    TAG_FAX,
+    TAG_FAY,
+    TAG_ICLIP,
+    TAG_BLUR,
+    TAG_FSCX,
+    TAG_FSCY,
+    TAG_FSC,
+    TAG_FSP,
+    TAG_FS,
+    TAG_BORD,
+    TAG_MOVE,
+    TAG_FRX,
+    TAG_FRY,
+    TAG_FRZ,
+    TAG_FR,
+    TAG_FN,
+    TAG_ALPHA,
+    TAG_AN,
+    TAG_A,
+    TAG_POS,
+    TAG_FADE,
+    TAG_FAD,
+    TAG_ORG,
+    TAG_T,
+    TAG_CLIP,
+    TAG_C,
+    TAG_1C,
+    TAG_2C,
+    TAG_3C,
+    TAG_4C,
+    TAG_1A,
+    TAG_2A,
+    TAG_3A,
+    TAG_4A,
+    TAG_R,
+    TAG_BE,
+    TAG_B,
+    TAG_I,
+    TAG_KT,
+    TAG_KF,
+    TAG_CAPITAL_K,
+    TAG_KO,
+    TAG_K,
+    TAG_SHAD,
+    TAG_S,
+    TAG_U,
+    TAG_PBO,
+    TAG_P,
+    TAG_Q,
+    TAG_FE,
+};
+
+typedef struct {
+    size_t start, end;
+    // Each argument's numeric kind depends only on its tag and argument count.
+    union {
+        double number;
+        int32_t integer;
+        uint32_t hex;
+    } value;
+    bool valid;
+} ParsedTagArg;
+
+typedef struct {
+    size_t args, next;
+    enum ass_tag_id id;
+    unsigned char nargs;
+    bool has_backslash_arg;
+} ParsedTag;
+
+typedef struct {
+    size_t start, end, override_end;
+    size_t first, last;
+} ParsedTextRun;
+
+typedef struct parsed_event {
+    ParsedTag *tags;
+    ParsedTagArg *args;
+    ParsedTextRun *runs;
+    size_t n_tags, max_tags, n_args, max_args, n_runs, max_runs;
+    bool valid;
+} ParsedEvent;
+
+void ass_apply_tags(RenderContext *state, char *text, const ParsedEvent *parsed,
+                    const ParsedTextRun *run);
+size_t ass_parsed_event_construct(void *key, void *value, void *priv);
+void ass_parsed_event_scratch_free(ParsedEvent *parsed);
+
 void ass_update_font(RenderContext *state);
 void ass_apply_transition_effects(RenderContext *state);
 void ass_process_karaoke_effects(RenderContext *state);

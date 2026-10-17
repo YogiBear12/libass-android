@@ -29,6 +29,7 @@
 #include "ass_font.h"
 #include "ass_outline.h"
 #include "ass_cache.h"
+#include "ass_parse.h"
 
 // Always enable native-endian mode, since we don't care about cross-platform consistency of the hash
 #define WYHASH_LITTLE_ENDIAN 1
@@ -48,6 +49,39 @@ static inline ass_hashcode ass_hash_buf(const void *buf, size_t len, ass_hashcod
 #include "ass_cache_template.h"
 #define CREATE_COMPARISON_FUNCTIONS
 #include "ass_cache_template.h"
+
+static bool parsed_event_key_move(void *dst, void *src)
+{
+    ParsedEventKey *d = dst, *s = src;
+    if (!d)
+        return true;
+    *d = *s;
+    d->text.str = ass_copy_string(s->text);
+    return d->text.str;
+}
+
+static void parsed_event_destruct(void *key, void *value)
+{
+    ParsedEventKey *k = key;
+    ParsedEvent *v = value;
+    free((char *) k->text.str);
+    free(v->tags);
+}
+
+static const CacheDesc parsed_event_cache_desc = {
+    .hash_func = parsed_event_hash,
+    .compare_func = parsed_event_compare,
+    .key_move_func = parsed_event_key_move,
+    .construct_func = ass_parsed_event_construct,
+    .destruct_func = parsed_event_destruct,
+    .key_size = sizeof(ParsedEventKey),
+    .value_size = sizeof(ParsedEvent),
+};
+
+Cache *ass_parsed_event_cache_create(void)
+{
+    return ass_cache_create(&parsed_event_cache_desc);
+}
 
 // font cache
 static bool font_key_move(void *dst, void *src)

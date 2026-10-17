@@ -28,25 +28,40 @@
 #include "ass_render.h"
 #include "ass_parse.h"
 
+#define PARSED_EVENT_INITIAL_CAPACITY 16
+
 #define MAX_VALID_NARGS 7
 #define MAX_BE 127
 #define NBSP 0xa0   // unicode non-breaking space character
 
 struct arg {
     char *start, *end;
+    ParsedTagArg *cached;
 };
 
 static inline int32_t argtoi32(struct arg arg)
 {
+    if (arg.cached && arg.cached->valid)
+        return arg.cached->value.integer;
     int32_t value;
     mystrtoi32(&arg.start, 10, &value);
+    if (arg.cached) {
+        arg.cached->value.integer = value;
+        arg.cached->valid = true;
+    }
     return value;
 }
 
 static inline double argtod(struct arg arg)
 {
+    if (arg.cached && arg.cached->valid)
+        return arg.cached->value.number;
     double value;
     mystrtod(&arg.start, &value);
+    if (arg.cached) {
+        arg.cached->value.number = value;
+        arg.cached->valid = true;
+    }
     return value;
 }
 
@@ -55,7 +70,7 @@ static inline void push_arg(struct arg *args, int *nargs, char *start, char *end
     if (*nargs <= MAX_VALID_NARGS) {
         rskip_spaces(&end, start);
         if (end > start) {
-            args[*nargs] = (struct arg) {start, end};
+            args[*nargs] = (struct arg) { .start = start, .end = end };
             ++*nargs;
         }
     }
@@ -228,26 +243,41 @@ static bool parse_vector_clip(RenderContext *state,
     return true;
 }
 
-static int32_t parse_alpha_tag(char *str)
+static int32_t parse_alpha_tag(struct arg arg)
 {
+    if (arg.cached && arg.cached->valid)
+        return arg.cached->value.hex;
+    char *str = arg.start;
     int32_t alpha = 0;
 
     while (*str == '&' || *str == 'H')
         ++str;
 
     mystrtoi32(&str, 16, &alpha);
+    if (arg.cached) {
+        arg.cached->value.hex = alpha;
+        arg.cached->valid = true;
+    }
     return alpha;
 }
 
-static uint32_t parse_color_tag(char *str)
+static uint32_t parse_color_tag(struct arg arg)
 {
+    if (arg.cached && arg.cached->valid)
+        return arg.cached->value.hex;
+    char *str = arg.start;
     int32_t color = 0;
 
     while (*str == '&' || *str == 'H')
         ++str;
 
     mystrtoi32(&str, 16, &color);
-    return ass_bswap32((uint32_t) color);
+    uint32_t value = ass_bswap32((uint32_t) color);
+    if (arg.cached) {
+        arg.cached->value.hex = value;
+        arg.cached->valid = true;
+    }
+    return value;
 }
 
 /**
@@ -272,27 +302,84 @@ static ASS_Style *lookup_style_strict(ASS_Track *track, char *name, size_t len)
     return NULL;
 }
 
-/**
- * \brief Parse style override tags.
- * \param p string to parse
- * \param end end of string to parse, which must be '}', ')', or the first
- *            of a number of spaces immediately preceding '}' or ')'
- * \param pwr multiplier for some tag effects (comes from \t tags)
- */
-char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
-                     bool nested)
+static const struct {
+    const char *name;
+    enum ass_tag_id id;
+    bool complex;
+} tag_names[] = {
+    { "xbord", TAG_XBORD, false },
+    { "ybord", TAG_YBORD, false },
+    { "xshad", TAG_XSHAD, false },
+    { "yshad", TAG_YSHAD, false },
+    { "fax", TAG_FAX, false },
+    { "fay", TAG_FAY, false },
+    { "iclip", TAG_ICLIP, true },
+    { "blur", TAG_BLUR, false },
+    { "fscx", TAG_FSCX, false },
+    { "fscy", TAG_FSCY, false },
+    { "fsc", TAG_FSC, false },
+    { "fsp", TAG_FSP, false },
+    { "fs", TAG_FS, false },
+    { "bord", TAG_BORD, false },
+    { "move", TAG_MOVE, true },
+    { "frx", TAG_FRX, false },
+    { "fry", TAG_FRY, false },
+    { "frz", TAG_FRZ, false },
+    { "fr", TAG_FR, false },
+    { "fn", TAG_FN, false },
+    { "alpha", TAG_ALPHA, false },
+    { "an", TAG_AN, false },
+    { "a", TAG_A, false },
+    { "pos", TAG_POS, true },
+    { "fade", TAG_FADE, true },
+    { "fad", TAG_FAD, true },
+    { "org", TAG_ORG, true },
+    { "t", TAG_T, true },
+    { "clip", TAG_CLIP, true },
+    { "c", TAG_C, false },
+    { "1c", TAG_1C, false },
+    { "2c", TAG_2C, false },
+    { "3c", TAG_3C, false },
+    { "4c", TAG_4C, false },
+    { "1a", TAG_1A, false },
+    { "2a", TAG_2A, false },
+    { "3a", TAG_3A, false },
+    { "4a", TAG_4A, false },
+    { "r", TAG_R, false },
+    { "be", TAG_BE, false },
+    { "b", TAG_B, false },
+    { "i", TAG_I, false },
+    { "kt", TAG_KT, false },
+    { "kf", TAG_KF, false },
+    { "K", TAG_CAPITAL_K, false },
+    { "ko", TAG_KO, false },
+    { "k", TAG_K, false },
+    { "shad", TAG_SHAD, false },
+    { "s", TAG_S, false },
+    { "u", TAG_U, false },
+    { "pbo", TAG_PBO, false },
+    { "p", TAG_P, false },
+    { "q", TAG_Q, false },
+    { "fe", TAG_FE, false },
+};
+
+static bool lex_tag(char **cursor, char **after, char *end,
+                    struct arg *args, int *nargs, bool *has_backslash_arg,
+                    enum ass_tag_id *id)
 {
-    ASS_Renderer *render_priv = state->renderer;
-    for (char *q; p < end; p = q) {
+    char *p = *cursor;
+    while (p < end) {
         while (*p != '\\' && p != end)
             ++p;
-        if (*p != '\\')
-            break;
+        if (*p != '\\') {
+            *cursor = p;
+            return false;
+        }
         ++p;
         if (p != end)
             skip_spaces(&p);
 
-        q = p;
+        char *q = p;
         while (*q != '(' && *q != '\\' && q != end)
             ++q;
         if (q == p)
@@ -301,11 +388,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
         char *name_end = q;
 
         // Store one extra element to be able to detect excess arguments
-        struct arg args[MAX_VALID_NARGS + 1];
-        int nargs = 0;
-        bool has_backslash_arg = false;
+        *nargs = 0;
+        *has_backslash_arg = false;
         for (int i = 0; i <= MAX_VALID_NARGS; ++i)
-            args[i].start = args[i].end = "";
+            args[i] = (struct arg) { .start = "", .end = "" };
 
         // Split parenthesized arguments. Do this for all tags and before
         // any non-parenthesized argument because that's what VSFilter does.
@@ -325,20 +411,20 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     ++r;
 
                 if (*r == ',') {
-                    push_arg(args, &nargs, q, r);
+                    push_arg(args, nargs, q, r);
                     q = r + 1;
                 } else {
                     // Swallow the rest of the parenthesized string. This could
                     // be either a backslash-argument or simply the last argument.
                     if (*r == '\\') {
-                        has_backslash_arg = true;
+                        *has_backslash_arg = true;
                         char *paren = memchr(r, ')', end - r);
                         if (paren)
                             r = paren;
                         else
                             r = end;
                     }
-                    push_arg(args, &nargs, q, r);
+                    push_arg(args, nargs, q, r);
                     q = r;
                     // The closing parenthesis could be missing.
                     if (q != end)
@@ -348,11 +434,209 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             }
         }
 
-#define tag(name) (mystrcmp(&p, (name)) && (push_arg(args, &nargs, p, name_end), 1))
-#define complex_tag(name) mystrcmp(&p, (name))
+        *id = TAG_UNKNOWN;
+        for (size_t i = 0; i < sizeof(tag_names) / sizeof(tag_names[0]); i++) {
+            if (mystrcmp(&p, tag_names[i].name)) {
+                *id = tag_names[i].id;
+                if (!tag_names[i].complex)
+                    push_arg(args, nargs, p, name_end);
+                break;
+            }
+        }
+        *cursor = p;
+        *after = q;
+        return true;
+    }
+    *cursor = p;
+    return false;
+}
 
+static bool lex_tags(ParsedEvent *parsed, char *text, char *p, char *end,
+                     bool nested)
+{
+    size_t tail_parent = SIZE_MAX;
+    char *q;
+    while (p < end) {
+        struct arg args[MAX_VALID_NARGS + 1];
+        int nargs;
+        bool has_backslash_arg;
+        enum ass_tag_id id;
+        if (!lex_tag(&p, &q, end, args, &nargs, &has_backslash_arg, &id))
+            break;
+        if (parsed->n_tags == parsed->max_tags) {
+            size_t count = parsed->max_tags ? parsed->max_tags * 2 : PARSED_EVENT_INITIAL_CAPACITY;
+            if (count < parsed->max_tags || !ASS_REALLOC_ARRAY(parsed->tags, count))
+                return false;
+            parsed->max_tags = count;
+        }
+        if (parsed->n_args + nargs > parsed->max_args) {
+            size_t count = parsed->max_args ? parsed->max_args * 2 : PARSED_EVENT_INITIAL_CAPACITY;
+            if (count < parsed->max_args || !ASS_REALLOC_ARRAY(parsed->args, count))
+                return false;
+            parsed->max_args = count;
+        }
+        size_t index = parsed->n_tags++;
+        parsed->tags[index] = (ParsedTag) {
+            .id = id, .args = parsed->n_args, .nargs = nargs,
+            .has_backslash_arg = has_backslash_arg, .next = index + 1,
+        };
+        for (int i = 0; i < nargs; i++) {
+            parsed->args[parsed->n_args++] = (ParsedTagArg) {
+                .start = args[i].start - text, .end = args[i].end - text,
+            };
+        }
+        int cnt = nargs - 1;
+        if (id == TAG_T && cnt >= 0 && cnt <= 3 && has_backslash_arg) {
+            if (args[cnt].end < end) {
+                // Such a nested transform asserts in the uncached parser.
+                if (nested || !lex_tags(parsed, text, args[cnt].start, args[cnt].end, true))
+                    return false;
+                parsed->tags[index].next = parsed->n_tags;
+            } else {
+                // Tail transforms share the enclosing range and must not recurse.
+                parsed->tags[index].next = tail_parent;
+                tail_parent = index;
+                nested = true;
+                q = args[cnt].start;
+            }
+        }
+        p = q;
+    }
+    while (tail_parent != SIZE_MAX) {
+        size_t parent = parsed->tags[tail_parent].next;
+        parsed->tags[tail_parent].next = parsed->n_tags;
+        tail_parent = parent;
+    }
+    return true;
+}
+
+void ass_parsed_event_scratch_free(ParsedEvent *parsed)
+{
+    if (!parsed)
+        return;
+    free(parsed->tags);
+    free(parsed->args);
+    free(parsed->runs);
+    free(parsed);
+}
+
+size_t ass_parsed_event_construct(void *key, void *value, void *priv)
+{
+    ParsedEventKey *k = key;
+    ParsedEvent *result = value;
+    ASS_Renderer *renderer = priv;
+    *result = (ParsedEvent) {0};
+    if (!renderer->parsed_event_scratch)
+        renderer->parsed_event_scratch = calloc(1, sizeof(ParsedEvent));
+    ParsedEvent *parsed = renderer->parsed_event_scratch;
+    if (!parsed)
+        goto fail;
+    parsed->n_tags = parsed->n_args = parsed->n_runs = 0;
+    char *text = (char *) k->text.str;
+    char *p = text, *close = strchr(text, '}');
+    while (*p) {
+        if (parsed->n_runs == parsed->max_runs) {
+            size_t count = parsed->max_runs ? parsed->max_runs * 2 : PARSED_EVENT_INITIAL_CAPACITY;
+            if (count < parsed->max_runs || !ASS_REALLOC_ARRAY(parsed->runs, count))
+                goto fail;
+            parsed->max_runs = count;
+        }
+        if (*p == '{' && close && close < p)
+            close = strchr(p, '}');
+        // Escaped braces are literal in text but open overrides in drawings.
+        if (*p == '{' && close && p > text && p[-1] == '\\' &&
+            memchr(p + 1, '{', close - p - 1))
+            goto fail;
+        char *q = strchr(*p == '{' && close ? close + 1 : p + (*p == '{'), '{');
+        if (!q)
+            q = text + k->text.len;
+        ParsedTextRun run = {
+            .start = p - text, .end = q - text, .override_end = SIZE_MAX,
+            .first = parsed->n_tags,
+        };
+        if (*p == '{') {
+            if (close) {
+                run.override_end = close - text;
+                if (!lex_tags(parsed, text, p, close, false))
+                    goto fail;
+            }
+        }
+        run.last = parsed->n_tags;
+        parsed->runs[parsed->n_runs++] = run;
+        p = q;
+    }
+    size_t tags_size = parsed->n_tags * sizeof(*parsed->tags);
+    size_t args_size = parsed->n_args * sizeof(*parsed->args);
+    size_t runs_size = parsed->n_runs * sizeof(*parsed->runs);
+    size_t args_offset = ass_align(_Alignof(ParsedTagArg), tags_size);
+    if (args_offset < tags_size || args_offset > SIZE_MAX - args_size)
+        goto fail;
+    size_t runs_offset = ass_align(_Alignof(ParsedTextRun), args_offset + args_size);
+    if (runs_offset < args_offset + args_size || runs_offset > SIZE_MAX - runs_size)
+        goto fail;
+    size_t size = runs_offset + runs_size;
+    if (size) {
+        char *block = malloc(size);
+        if (!block)
+            goto fail;
+        *result = (ParsedEvent) {
+            .tags = (ParsedTag *) block,
+            .args = (ParsedTagArg *) (block + args_offset),
+            .runs = (ParsedTextRun *) (block + runs_offset),
+            .n_tags = parsed->n_tags, .max_tags = parsed->n_tags,
+            .n_args = parsed->n_args, .max_args = parsed->n_args,
+            .n_runs = parsed->n_runs, .max_runs = parsed->n_runs,
+        };
+        if (tags_size)
+            memcpy(result->tags, parsed->tags, tags_size);
+        if (args_size)
+            memcpy(result->args, parsed->args, args_size);
+        if (runs_size)
+            memcpy(result->runs, parsed->runs, runs_size);
+    }
+    result->valid = true;
+    return sizeof(*k) + sizeof(*result) + k->text.len + 1 + size;
+
+fail:
+    return sizeof(*k) + sizeof(*result) + k->text.len + 1;
+}
+
+static char *apply_tags(RenderContext *state, char *text, char *p, char *end,
+                        double pwr, bool nested, const ParsedEvent *parsed,
+                        size_t first, size_t last)
+{
+    ASS_Renderer *render_priv = state->renderer;
+    size_t next = first;
+    char *q = p;
+    while (parsed ? next < last : p < end) {
+        struct arg args[MAX_VALID_NARGS + 1];
+        int nargs;
+        bool has_backslash_arg;
+        enum ass_tag_id id;
+        size_t current = next;
+        const ParsedTag *record = NULL;
+        if (parsed) {
+            q = end;
+            record = &parsed->tags[current];
+            next = record->next;
+            id = record->id;
+            nargs = record->nargs;
+            has_backslash_arg = record->has_backslash_arg;
+            args[0] = (struct arg) { .start = "", .end = "" };
+            for (int i = 0; i < nargs; i++) {
+                ParsedTagArg *arg = &parsed->args[record->args + i];
+                args[i] = (struct arg) {
+                    .start = text + arg->start, .end = text + arg->end,
+                    .cached = arg,
+                };
+            }
+        } else if (!lex_tag(&p, &q, end, args, &nargs,
+                            &has_backslash_arg, &id))
+            break;
         // New tags introduced in vsfilter 2.39
-        if (tag("xbord")) {
+        switch (id) {
+        case TAG_XBORD:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -361,7 +645,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->Outline;
             state->border_x = val;
-        } else if (tag("ybord")) {
+            break;
+        }
+        case TAG_YBORD:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -370,7 +657,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->Outline;
             state->border_y = val;
-        } else if (tag("xshad")) {
+            break;
+        }
+        case TAG_XSHAD:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -378,7 +668,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->Shadow;
             state->shadow_x = val;
-        } else if (tag("yshad")) {
+            break;
+        }
+        case TAG_YSHAD:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -386,7 +679,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->Shadow;
             state->shadow_y = val;
-        } else if (tag("fax")) {
+            break;
+        }
+        case TAG_FAX:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -394,7 +690,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     val * pwr + state->fax * (1 - pwr);
             } else
                 state->fax = 0.;
-        } else if (tag("fay")) {
+            break;
+        }
+        case TAG_FAY:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -402,7 +701,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     val * pwr + state->fay * (1 - pwr);
             } else
                 state->fay = 0.;
-        } else if (complex_tag("iclip")) {
+            break;
+        }
+        case TAG_ICLIP:
+        {
             if (nargs == 4) {
                 int32_t x0, y0, x1, y1;
                 x0 = argtoi32(args[0]);
@@ -422,7 +724,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 if (parse_vector_clip(state, args, nargs))
                     state->clip_drawing_mode = 1;
             }
-        } else if (tag("blur")) {
+            break;
+        }
+        case TAG_BLUR:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -433,7 +738,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 state->blur = 0.0;
             // ASS standard tags
-        } else if (tag("fscx")) {
+            break;
+        }
+        case TAG_FSCX:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args) / 100;
@@ -442,7 +750,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->ScaleX;
             state->scale_x = val;
-        } else if (tag("fscy")) {
+            break;
+        }
+        case TAG_FSCY:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args) / 100;
@@ -451,10 +762,16 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 val = state->style->ScaleY;
             state->scale_y = val;
-        } else if (tag("fsc")) {
+            break;
+        }
+        case TAG_FSC:
+        {
             state->scale_x = state->style->ScaleX;
             state->scale_y = state->style->ScaleY;
-        } else if (tag("fsp")) {
+            break;
+        }
+        case TAG_FSP:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -462,7 +779,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     state->hspacing * (1 - pwr) + val * pwr;
             } else
                 state->hspacing = state->style->Spacing;
-        } else if (tag("fs")) {
+            break;
+        }
+        case TAG_FS:
+        {
             double val = 0;
             if (nargs) {
                 val = argtod(*args);
@@ -474,7 +794,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             if (val <= 0)
                 val = state->style->FontSize;
             state->font_size = val;
-        } else if (tag("bord")) {
+            break;
+        }
+        case TAG_BORD:
+        {
             double val, xval, yval;
             if (nargs) {
                 val = argtod(*args);
@@ -486,7 +809,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 xval = yval = state->style->Outline;
             state->border_x = xval;
             state->border_y = yval;
-        } else if (complex_tag("move")) {
+            break;
+        }
+        case TAG_MOVE:
+        {
             double x1, x2, y1, y2;
             int32_t t1, t2, delta_t, t;
             double x, y;
@@ -507,7 +833,7 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     }
                 }
             } else
-                continue;
+                goto next_tag;
             if (t1 <= 0 && t2 <= 0) {
                 t1 = 0;
                 t2 = state->event->Duration;
@@ -528,7 +854,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->detect_collisions = 0;
                 state->evt_type |= EVENT_POSITIONED;
             }
-        } else if (tag("frx")) {
+            break;
+        }
+        case TAG_FRX:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -536,7 +865,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     val * pwr + state->frx * (1 - pwr);
             } else
                 state->frx = 0.;
-        } else if (tag("fry")) {
+            break;
+        }
+        case TAG_FRY:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -544,7 +876,11 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                     val * pwr + state->fry * (1 - pwr);
             } else
                 state->fry = 0.;
-        } else if (tag("frz") || tag("fr")) {
+            break;
+        }
+        case TAG_FRZ:
+        case TAG_FR:
+        {
             double val;
             if (nargs) {
                 val = argtod(*args);
@@ -553,7 +889,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             } else
                 state->frz =
                     state->style->Angle;
-        } else if (tag("fn")) {
+            break;
+        }
+        case TAG_FN:
+        {
             char *start = args->start;
             if (nargs && strncmp(start, "0", args->end - start)) {
                 skip_spaces(&start);
@@ -564,10 +903,13 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->family.len = strlen(state->style->FontName);
             }
             ass_update_font(state);
-        } else if (tag("alpha")) {
+            break;
+        }
+        case TAG_ALPHA:
+        {
             int i;
             if (nargs) {
-                int32_t a = parse_alpha_tag(args->start);
+                int32_t a = parse_alpha_tag(*args);
                 for (i = 0; i < 4; ++i)
                     change_alpha(&state->c[i], a, pwr);
             } else {
@@ -581,7 +923,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                              _a(state->style->BackColour), 1);
             }
             // FIXME: simplify
-        } else if (tag("an")) {
+            break;
+        }
+        case TAG_AN:
+        {
             int32_t val = argtoi32(*args);
             if ((state->parsed_tags & PARSED_A) == 0) {
                 if (val >= 1 && val <= 9)
@@ -591,7 +936,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                         state->style->Alignment;
                 state->parsed_tags |= PARSED_A;
             }
-        } else if (tag("a")) {
+            break;
+        }
+        case TAG_A:
+        {
             int32_t val = argtoi32(*args);
             if ((state->parsed_tags & PARSED_A) == 0) {
                 if (val >= 1 && val <= 11)
@@ -603,13 +951,16 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                         state->style->Alignment;
                 state->parsed_tags |= PARSED_A;
             }
-        } else if (complex_tag("pos")) {
+            break;
+        }
+        case TAG_POS:
+        {
             double v1, v2;
             if (nargs == 2) {
                 v1 = argtod(args[0]);
                 v2 = argtod(args[1]);
             } else
-                continue;
+                goto next_tag;
             if (state->evt_type & EVENT_POSITIONED) {
                 ass_msg(render_priv->library, MSGL_V, "Subtitle has a new \\pos "
                        "after \\move or \\pos, ignoring");
@@ -619,7 +970,11 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->pos_x = v1;
                 state->pos_y = v2;
             }
-        } else if (complex_tag("fade") || complex_tag("fad")) {
+            break;
+        }
+        case TAG_FADE:
+        case TAG_FAD:
+        {
             int32_t a1, a2, a3;
             int32_t t1, t2, t3, t4;
             if (nargs == 2) {
@@ -641,7 +996,7 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 t3 = argtoi32(args[5]);
                 t4 = argtoi32(args[6]);
             } else
-                continue;
+                goto next_tag;
             if (t1 == -1 && t4 == -1) {
                 t1 = 0;
                 t4 = state->event->Duration;
@@ -654,20 +1009,26 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                             t3, t4, a1, a2, a3);
                 state->parsed_tags |= PARSED_FADE;
             }
-        } else if (complex_tag("org")) {
+            break;
+        }
+        case TAG_ORG:
+        {
             double v1, v2;
             if (nargs == 2) {
                 v1 = argtod(args[0]);
                 v2 = argtod(args[1]);
             } else
-                continue;
+                goto next_tag;
             if (!state->have_origin) {
                 state->org_x = v1;
                 state->org_y = v2;
                 state->have_origin = 1;
                 state->detect_collisions = 0;
             }
-        } else if (complex_tag("t")) {
+            break;
+        }
+        case TAG_T:
+        {
             double accel;
             int cnt = nargs - 1;
             int32_t t1, t2, t, delta_t;
@@ -707,15 +1068,20 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             if (nested)
                 pwr = k;
             if (cnt < 0 || cnt > 3)
-                continue;
+                goto next_tag;
             // If there's no backslash in the arguments, there are no
             // override tags, so it's pointless to try to parse them.
             if (!has_backslash_arg)
-                continue;
+                goto next_tag;
             p = args[cnt].start;
             if (args[cnt].end < end) {
                 assert(!nested);
-                p = ass_parse_tags(state, p, args[cnt].end, k, true);
+                if (parsed)
+                    apply_tags(state, text, p, args[cnt].end, k, true,
+                               parsed, current + 1, record->next);
+                else
+                    apply_tags(state, text, p, args[cnt].end, k, true,
+                               NULL, 0, 0);
             } else {
                 assert(q == end);
                 // No other tags can possibly follow this \t tag,
@@ -725,8 +1091,13 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 pwr = k;
                 nested = true;
                 q = p;
+                if (parsed)
+                    next = current + 1;
             }
-        } else if (complex_tag("clip")) {
+            break;
+        }
+        case TAG_CLIP:
+        {
             if (nargs == 4) {
                 int32_t x0, y0, x1, y1;
                 x0 = argtoi32(args[0]);
@@ -746,70 +1117,101 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 if (parse_vector_clip(state, args, nargs))
                     state->clip_drawing_mode = 0;
             }
-        } else if (tag("c") || tag("1c")) {
+            break;
+        }
+        case TAG_C:
+        case TAG_1C:
+        {
             if (nargs) {
-                uint32_t val = parse_color_tag(args->start);
+                uint32_t val = parse_color_tag(*args);
                 change_color(&state->c[0], val, pwr);
             } else
                 change_color(&state->c[0],
                              state->style->PrimaryColour, 1);
-        } else if (tag("2c")) {
+            break;
+        }
+        case TAG_2C:
+        {
             if (nargs) {
-                uint32_t val = parse_color_tag(args->start);
+                uint32_t val = parse_color_tag(*args);
                 change_color(&state->c[1], val, pwr);
             } else
                 change_color(&state->c[1],
                              state->style->SecondaryColour, 1);
-        } else if (tag("3c")) {
+            break;
+        }
+        case TAG_3C:
+        {
             if (nargs) {
-                uint32_t val = parse_color_tag(args->start);
+                uint32_t val = parse_color_tag(*args);
                 change_color(&state->c[2], val, pwr);
             } else
                 change_color(&state->c[2],
                              state->style->OutlineColour, 1);
-        } else if (tag("4c")) {
+            break;
+        }
+        case TAG_4C:
+        {
             if (nargs) {
-                uint32_t val = parse_color_tag(args->start);
+                uint32_t val = parse_color_tag(*args);
                 change_color(&state->c[3], val, pwr);
             } else
                 change_color(&state->c[3],
                              state->style->BackColour, 1);
-        } else if (tag("1a")) {
+            break;
+        }
+        case TAG_1A:
+        {
             if (nargs) {
-                uint32_t val = parse_alpha_tag(args->start);
+                uint32_t val = parse_alpha_tag(*args);
                 change_alpha(&state->c[0], val, pwr);
             } else
                 change_alpha(&state->c[0],
                              _a(state->style->PrimaryColour), 1);
-        } else if (tag("2a")) {
+            break;
+        }
+        case TAG_2A:
+        {
             if (nargs) {
-                uint32_t val = parse_alpha_tag(args->start);
+                uint32_t val = parse_alpha_tag(*args);
                 change_alpha(&state->c[1], val, pwr);
             } else
                 change_alpha(&state->c[1],
                              _a(state->style->SecondaryColour), 1);
-        } else if (tag("3a")) {
+            break;
+        }
+        case TAG_3A:
+        {
             if (nargs) {
-                uint32_t val = parse_alpha_tag(args->start);
+                uint32_t val = parse_alpha_tag(*args);
                 change_alpha(&state->c[2], val, pwr);
             } else
                 change_alpha(&state->c[2],
                              _a(state->style->OutlineColour), 1);
-        } else if (tag("4a")) {
+            break;
+        }
+        case TAG_4A:
+        {
             if (nargs) {
-                uint32_t val = parse_alpha_tag(args->start);
+                uint32_t val = parse_alpha_tag(*args);
                 change_alpha(&state->c[3], val, pwr);
             } else
                 change_alpha(&state->c[3],
                              _a(state->style->BackColour), 1);
-        } else if (tag("r")) {
+            break;
+        }
+        case TAG_R:
+        {
             if (nargs) {
                 int len = args->end - args->start;
                 ass_reset_render_context(state,
                         lookup_style_strict(render_priv->track, args->start, len));
             } else
                 ass_reset_render_context(state, NULL);
-        } else if (tag("be")) {
+            break;
+        }
+        case TAG_BE:
+        {
             double dval;
             if (nargs) {
                 int32_t val;
@@ -822,19 +1224,28 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->be = val;
             } else
                 state->be = 0;
-        } else if (tag("b")) {
+            break;
+        }
+        case TAG_B:
+        {
             int32_t val = argtoi32(*args);
             if (!nargs || !(val == 0 || val == 1 || val >= 100))
                 val = state->style->Bold;
             state->bold = val;
             ass_update_font(state);
-        } else if (tag("i")) {
+            break;
+        }
+        case TAG_I:
+        {
             int32_t val = argtoi32(*args);
             if (!nargs || !(val == 0 || val == 1))
                 val = state->style->Italic;
             state->italic = val;
             ass_update_font(state);
-        } else if (tag("kt")) {
+            break;
+        }
+        case TAG_KT:
+        {
             // v4++
             double val = 0;
             if (nargs)
@@ -842,7 +1253,11 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             state->effect_skip_timing = dtoi32(val);
             state->effect_timing = 0;
             state->reset_effect = true;
-        } else if (tag("kf") || tag("K")) {
+            break;
+        }
+        case TAG_KF:
+        case TAG_CAPITAL_K:
+        {
             double val = 100;
             if (nargs)
                 val = argtod(*args);
@@ -850,7 +1265,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             state->effect_skip_timing +=
                     (uint32_t) state->effect_timing;
             state->effect_timing = dtoi32(val * 10);
-        } else if (tag("ko")) {
+            break;
+        }
+        case TAG_KO:
+        {
             double val = 100;
             if (nargs)
                 val = argtod(*args);
@@ -858,7 +1276,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             state->effect_skip_timing +=
                     (uint32_t) state->effect_timing;
             state->effect_timing = dtoi32(val * 10);
-        } else if (tag("k")) {
+            break;
+        }
+        case TAG_K:
+        {
             double val = 100;
             if (nargs)
                 val = argtod(*args);
@@ -866,7 +1287,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
             state->effect_skip_timing +=
                     (uint32_t) state->effect_timing;
             state->effect_timing = dtoi32(val * 10);
-        } else if (tag("shad")) {
+            break;
+        }
+        case TAG_SHAD:
+        {
             double val, xval, yval;
             if (nargs) {
                 val = argtod(*args);
@@ -879,7 +1303,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 xval = yval = state->style->Shadow;
             state->shadow_x = xval;
             state->shadow_y = yval;
-        } else if (tag("s")) {
+            break;
+        }
+        case TAG_S:
+        {
             int32_t val = argtoi32(*args);
             if (!nargs || !(val == 0 || val == 1))
                 val = state->style->StrikeOut;
@@ -887,7 +1314,10 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->flags |= DECO_STRIKETHROUGH;
             else
                 state->flags &= ~DECO_STRIKETHROUGH;
-        } else if (tag("u")) {
+            break;
+        }
+        case TAG_U:
+        {
             int32_t val = argtoi32(*args);
             if (!nargs || !(val == 0 || val == 1))
                 val = state->style->Underline;
@@ -895,29 +1325,66 @@ char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
                 state->flags |= DECO_UNDERLINE;
             else
                 state->flags &= ~DECO_UNDERLINE;
-        } else if (tag("pbo")) {
+            break;
+        }
+        case TAG_PBO:
+        {
             double val = argtod(*args);
             state->pbo = val;
-        } else if (tag("p")) {
+            break;
+        }
+        case TAG_P:
+        {
             int32_t val = argtoi32(*args);
             val = (val < 0) ? 0 : val;
             state->drawing_scale = val;
-        } else if (tag("q")) {
+            break;
+        }
+        case TAG_Q:
+        {
             int32_t val = argtoi32(*args);
             if (!nargs || !(val >= 0 && val <= 3))
                 val = render_priv->track->WrapStyle;
             state->wrap_style = val;
-        } else if (tag("fe")) {
+            break;
+        }
+        case TAG_FE:
+        {
             int32_t val;
             if (nargs)
                 val = argtoi32(*args);
             else
                 val = state->style->Encoding;
             state->font_encoding = val;
+            break;
         }
+        default:
+            break;
+        }
+next_tag:
+        p = q;
     }
+    return end;
+}
 
-    return p;
+/**
+ * \brief Parse style override tags.
+ * \param p string to parse
+ * \param end end of string to parse, which must be '}', ')', or the first
+ *            of a number of spaces immediately preceding '}' or ')'
+ * \param pwr multiplier for some tag effects (comes from \t tags)
+ */
+char *ass_parse_tags(RenderContext *state, char *p, char *end, double pwr,
+                     bool nested)
+{
+    return apply_tags(state, p, p, end, pwr, nested, NULL, 0, 0);
+}
+
+void ass_apply_tags(RenderContext *state, char *text, const ParsedEvent *parsed,
+                    const ParsedTextRun *run)
+{
+    apply_tags(state, text, text + run->start, text + run->override_end,
+               1., false, parsed, run->first, run->last);
 }
 
 void ass_apply_transition_effects(RenderContext *state)

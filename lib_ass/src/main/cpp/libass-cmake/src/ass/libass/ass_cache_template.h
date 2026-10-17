@@ -95,6 +95,11 @@ START(glyph, glyph_hash_key)
     GENERIC(unsigned, flags) // glyph decoration flags
 END(GlyphHashKey)
 
+// Event text is copied on insertion and freed on eviction.
+START(parsed_event, parsed_event_key)
+    STRING(text)
+END(ParsedEventKey)
+
 // describes an outline drawing
 // on call to ass_cache_get(), text is a non-owning view;
 // its content is duplicated when inserted; the copy is freed when dropped

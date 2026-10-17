@@ -135,13 +135,15 @@ ASS_Renderer *ass_renderer_init(ASS_Library *library)
 #endif
     priv->engine = ass_bitmap_engine_init(flags);
 
+    priv->cache.parsed_event_cache = ass_parsed_event_cache_create();
     priv->cache.font_cache = ass_font_cache_create();
     priv->cache.bitmap_cache = ass_bitmap_cache_create();
     priv->cache.composite_cache = ass_composite_cache_create();
     priv->cache.outline_cache = ass_outline_cache_create();
     priv->cache.face_size_metrics_cache = ass_face_size_metrics_cache_create();
     priv->cache.metrics_cache = ass_glyph_metrics_cache_create();
-    if (!priv->cache.font_cache || !priv->cache.bitmap_cache ||
+    if (!priv->cache.parsed_event_cache ||
+        !priv->cache.font_cache || !priv->cache.bitmap_cache ||
         !priv->cache.composite_cache || !priv->cache.outline_cache ||
         !priv->cache.face_size_metrics_cache || !priv->cache.metrics_cache)
         goto fail;
@@ -180,6 +182,8 @@ void ass_renderer_done(ASS_Renderer *render_priv)
     ass_frame_unref(render_priv->images_root);
     ass_frame_unref(render_priv->prev_images_root);
 
+    ass_cache_done(render_priv->cache.parsed_event_cache);
+    ass_parsed_event_scratch_free(render_priv->parsed_event_scratch);
     ass_cache_done(render_priv->cache.composite_cache);
     ass_cache_done(render_priv->cache.bitmap_cache);
     ass_cache_done(render_priv->cache.outline_cache);
@@ -2080,6 +2084,12 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
     ASS_Renderer *render_priv = state->renderer;
 
     char *p = event->Text, *q;
+    ParsedEventKey key = { .text = { p, strlen(p) } };
+    ParsedEvent *parsed = ass_cache_get(render_priv->cache.parsed_event_cache,
+                                        &key, render_priv);
+    size_t run_index = 0;
+    if (parsed && !parsed->valid)
+        parsed = NULL;
 
     // Event parsing.
     while (true) {
@@ -2089,16 +2099,41 @@ static bool parse_events(RenderContext *state, ASS_Event *event)
         // this affects render_context
         unsigned code = 0;
         while (*p) {
-            if ((*p == '{') && (q = strchr(p, '}'))) {
-                p = ass_parse_tags(state, p, q, 1., false);
-                assert(*p == '}');
-                p++;
+            const ParsedTextRun *run = NULL;
+            if (parsed && (*p == '{' || state->drawing_scale)) {
+                size_t offset = p - event->Text;
+                while (run_index < parsed->n_runs && parsed->runs[run_index].end <= offset)
+                    run_index++;
+                if (run_index < parsed->n_runs)
+                    run = &parsed->runs[run_index];
+            }
+            q = NULL;
+            if (*p == '{') {
+                if (parsed) {
+                    if (run && run->override_end != SIZE_MAX)
+                        q = event->Text + run->override_end;
+                } else
+                    q = strchr(p, '}');
+            }
+            if (q) {
+                if (parsed) {
+                    ass_apply_tags(state, event->Text, parsed, run);
+                    p = event->Text + run->override_end + 1;
+                } else {
+                    p = ass_parse_tags(state, p, q, 1., false);
+                    assert(*p == '}');
+                    p++;
+                }
             } else if (state->drawing_scale) {
-                q = p;
-                if (*p == '{')
-                    q++;
-                while ((*q != '{') && (*q != 0))
-                    q++;
+                if (parsed)
+                    q = event->Text + run->end;
+                else {
+                    q = p;
+                    if (*p == '{')
+                        q++;
+                    while ((*q != '{') && (*q != 0))
+                        q++;
+                }
                 drawing_text.str = p;
                 drawing_text.len = q - p;
                 code = 0xfffc; // object replacement character
@@ -3096,6 +3131,7 @@ ass_render_event(RenderContext *state, ASS_Event *event,
  */
 static void check_cache_limits(ASS_Renderer *priv, CacheStore *cache)
 {
+    ass_cache_cut(cache->parsed_event_cache, PARSED_EVENT_CACHE_MAX_SIZE);
     ass_cache_cut(cache->composite_cache, cache->composite_max_size);
     ass_cache_cut(cache->bitmap_cache, cache->bitmap_max_size);
     ass_cache_cut(cache->outline_cache, cache->glyph_max);
@@ -3136,12 +3172,15 @@ ass_start_frame(ASS_Renderer *render_priv, ASS_Track *track,
     if (track->n_events == 0)
         return false;               // nothing to do
 
+    if (render_priv->track != track)
+        ass_cache_empty(render_priv->cache.parsed_event_cache);
     render_priv->track = track;
     render_priv->time = now;
 
     ass_lazy_track_init(render_priv->library, render_priv->track);
 
     if (render_priv->library->num_fontdata != render_priv->num_emfonts) {
+        ass_cache_empty(render_priv->cache.parsed_event_cache);
         assert(render_priv->library->num_fontdata > render_priv->num_emfonts);
         render_priv->num_emfonts = ass_update_embedded_fonts(
             render_priv->fontselect, render_priv->num_emfonts);

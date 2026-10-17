@@ -42,6 +42,7 @@
 
 #define GLYPH_CACHE_MAX 10000
 #define MEGABYTE (1024 * 1024)
+#define PARSED_EVENT_CACHE_MAX_SIZE (8 * MEGABYTE)
 #define BITMAP_CACHE_MAX_SIZE (128 * MEGABYTE)
 #define COMPOSITE_CACHE_RATIO 2
 #define COMPOSITE_CACHE_MAX_SIZE (BITMAP_CACHE_MAX_SIZE / COMPOSITE_CACHE_RATIO)
@@ -299,6 +300,7 @@ struct render_context {
 typedef struct render_context RenderContext;
 
 typedef struct {
+    Cache *parsed_event_cache;
     Cache *font_cache;
     Cache *outline_cache;
     Cache *bitmap_cache;
@@ -336,6 +338,7 @@ struct ass_renderer {
 
     RenderContext state;
     CacheStore cache;
+    struct parsed_event *parsed_event_scratch;
 
     BitmapEngine engine;
 
