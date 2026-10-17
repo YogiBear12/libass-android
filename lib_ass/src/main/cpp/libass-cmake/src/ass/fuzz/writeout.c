@@ -138,8 +138,9 @@ static void write_styles(FILE *f, ASS_Track *track)
                    "%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%d,%d,%d,%d,%d\n",
             s->Name, s->FontName, s->FontSize, s->PrimaryColour, s->SecondaryColour,
             s->OutlineColour, s->BackColour, s->Bold, s->Italic, s->Underline, s->StrikeOut,
-            s->ScaleX, s->ScaleY, s->Spacing, s->Angle, s->BorderStyle, s->Outline, s->Shadow,
-            ssa2ass_align(s->Alignment), s->MarginL, s->MarginR, s->MarginV, s->Encoding);
+            s->ScaleX * 100, s->ScaleY * 100, s->Spacing, s->Angle, s->BorderStyle,
+            s->Outline, s->Shadow, ssa2ass_align(s->Alignment),
+            s->MarginL, s->MarginR, s->MarginV, s->Encoding);
     }
 }
 
@@ -163,8 +164,11 @@ static void write_events(FILE *f, ASS_Track *track)
             continue;
         }
         fprintf(f, "Dialogue: %d,%s,%s,%s,%s,%03d,%03d,%03d,%s,%s\n",
-            e->Layer, start, end, (track->styles + e->Style)->Name, e->Name,
-            e->MarginL, e->MarginR, e->MarginV, e->Effect, e->Text);
+            e->Layer, start, end, (track->styles + e->Style)->Name,
+            e->Name ? e->Name : "",
+            e->MarginL, e->MarginR, e->MarginV,
+            e->Effect ? e->Effect : "",
+            e->Text);
     }
 }
 

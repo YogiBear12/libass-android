@@ -14,7 +14,7 @@ Build:
   the AAR.
 - `bootstrap.sh` generates the autotools files after cloning.
 
-libass:
+libass 0.17.5:
 
 - On armv7, the cache lookup avoids 64-bit division and `ass_lrint` compiles to one `vcvtr`.
 - Glyph runs that cannot reach the frame are skipped before rasterizing.

@@ -200,6 +200,11 @@ static int test_and_set_read_order_bit(ASS_Track *track, int id)
 
 static inline void clear_read_order_bit(ASS_Track *track, int id)
 {
+    // we previously loaded a packet with an invalid ReadOrder field
+    // (or int overflow) and decided to just skip checking for duplicates
+    if (id < 0)
+        return;
+
     int index = id >> 5;
     if (index < track->parser_priv->read_order_elems) {
         uint32_t mask = ~(1u << (id & 0x1F));
@@ -1851,7 +1856,8 @@ void ass_lazy_track_init(ASS_Library *lib, ASS_Track *track)
             ass_msg(lib, MSGL_WARN,
                    "PlayResY undefined, setting to %d", track->PlayResY);
         } else if (track->PlayResY <= 0) {
-            track->PlayResY = FFMAX(1, track->PlayResX * 3LL / 4);
+            // overflow-safe `* 3/4`
+            track->PlayResY = FFMAX(1, (track->PlayResX - 1u) - (track->PlayResX - 1u) / 4u);
             ass_msg(lib, MSGL_WARN,
                    "PlayResY undefined, setting to %d", track->PlayResY);
         } else if (track->PlayResX <= 0 && track->PlayResY == 1024) {
@@ -1859,7 +1865,7 @@ void ass_lazy_track_init(ASS_Library *lib, ASS_Track *track)
             ass_msg(lib, MSGL_WARN,
                    "PlayResX undefined, setting to %d", track->PlayResX);
         } else if (track->PlayResX <= 0) {
-            track->PlayResX = FFMAX(1, track->PlayResY * 4LL / 3);
+            track->PlayResX = FFMIN(track->PlayResY + track->PlayResY / 3u, (unsigned) INT_MAX);
             ass_msg(lib, MSGL_WARN,
                    "PlayResX undefined, setting to %d", track->PlayResX);
         }

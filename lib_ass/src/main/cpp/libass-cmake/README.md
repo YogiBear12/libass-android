@@ -9,7 +9,7 @@ Build libass for Android.
 * [freetype](https://gitlab.freedesktop.org/freetype/freetype) [v2.13.3](https://gitlab.freedesktop.org/freetype/freetype/-/tags/VER-2-13-3)
 * [expat](https://github.com/libexpat/libexpat) [2.7.1](https://github.com/libexpat/libexpat/releases/tag/R_2_7_1)
 * [fontconfig](https://gitlab.freedesktop.org/fontconfig/fontconfig) [master with daa175d2](https://gitlab.freedesktop.org/fontconfig/fontconfig/-/commit/daa175d234b8a362eedd4c18c33537cc2d19cd98)
-* [ass](https://github.com/libass/libass) [v0.17.4](https://github.com/libass/libass/releases/tag/0.17.4)
+* [ass](https://github.com/libass/libass) [v0.17.5](https://github.com/libass/libass/releases/tag/0.17.5)
 
 ## how to use
 

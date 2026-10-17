@@ -47,6 +47,7 @@ libass_src = files(
     'c/c_blur.c',
     'c/c_rasterizer.c',
     'ass.c',
+    'ass_arabic_charmap.c',
     'ass_bitmap.c',
     'ass_bitmap_engine.c',
     'ass_blur.c',
@@ -93,7 +94,7 @@ if enable_asm
         libass_src += asm_sources
     else
         asm_lib = static_library(
-            'libass_asm',
+            'ass_asm',
             config_h,
             sources: asm_sources,
             c_args: asm_args,
