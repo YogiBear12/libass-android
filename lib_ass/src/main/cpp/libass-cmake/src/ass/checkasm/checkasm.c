@@ -74,7 +74,7 @@ static const struct {
     { "SSE2",               "sse2",      ASS_CPU_FLAG_X86_SSE2 },
     { "SSSE3",              "ssse3",     ASS_CPU_FLAG_X86_SSSE3 },
     { "AVX2",               "avx2",      ASS_CPU_FLAG_X86_AVX2 },
-#elif ARCH_AARCH64
+#elif ARCH_AARCH64 || ARCH_ARM
     { "NEON",               "neon",      ASS_CPU_FLAG_ARM_NEON },
 #endif
     { 0 }

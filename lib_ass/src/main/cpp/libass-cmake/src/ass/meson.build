@@ -317,6 +317,9 @@ if not asm_option.disabled()
 
             add_project_arguments(nasm_args, language: 'nasm')
         endif
+    elif generic_cpu_family == 'arm'
+        enable_asm = cc.compiles('void f(void) { __asm__ volatile(".fpu neon\\n vadd.i8 q0, q0, q0"); }')
+        conf.set('ARCH_ARM', enable_asm.to_int())
     elif generic_cpu_family == 'aarch64'
         enable_asm = true
         conf.set('ARCH_AARCH64', 1)

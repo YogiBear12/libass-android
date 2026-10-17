@@ -18,6 +18,8 @@ if generic_cpu_family == 'x86'
     checkasm_src += checkasm_src_x86
 elif generic_cpu_family == 'aarch64'
     checkasm_src += checkasm_src_aarch64
+elif generic_cpu_family == 'arm'
+    checkasm_src += files('arm/checkasm_32.S')
 endif
 
 libass_checkasm = executable(

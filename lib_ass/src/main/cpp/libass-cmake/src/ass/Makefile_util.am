@@ -67,6 +67,9 @@ endif
 if AARCH64
 checkasm_checkasm_SOURCES += checkasm/arm/checkasm_64.S
 endif
+if ARM
+checkasm_checkasm_SOURCES += checkasm/arm/checkasm_32.S
+endif
 
 run-checkasm: checkasm/checkasm$(EXEEXT)
 	checkasm/checkasm$(EXEEXT)
