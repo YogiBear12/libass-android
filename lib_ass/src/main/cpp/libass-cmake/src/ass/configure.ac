@@ -287,6 +287,11 @@ AS_IF([test "x$enable_asm" != xno], [
             BITS=64
             BITTYPE=64
         ],
+        [arm*-*], [
+            cpu_family="arm"
+            BITS=32
+            BITTYPE=32
+        ],
         [ # default
             AC_MSG_NOTICE([Assembly optimizations are not yet supported on this architecture; disabling.])
         ]
@@ -346,6 +351,22 @@ AS_IF([test "x$enable_asm" != xno], [
                 ]
             )
             can_asm=true
+        ],
+        [arm], [
+            AC_MSG_CHECKING([if $CC supports NEON assembly])
+            AC_COMPILE_IFELSE([
+                AC_LANG_PROGRAM([], [[
+                    __asm__ volatile (
+                        ".fpu neon\n"
+                        "vadd.i8 q0, q0, q0\n"
+                    );
+                ]])
+            ], [
+                AC_MSG_RESULT([yes])
+                can_asm=true
+            ], [
+                AC_MSG_RESULT([no])
+            ])
         ]
     )
 ])
@@ -380,6 +401,7 @@ AM_CONDITIONAL([ASM], [test "x$can_asm" = xtrue])
 AM_CONDITIONAL([X86], [test "x$cpu_family" = xx86])
 AM_CONDITIONAL([X86_64], [test "x$cpu_family" = xx86 && test "x$BITS" = x64])
 AM_CONDITIONAL([AARCH64], [test "x$cpu_family" = xaarch64])
+AM_CONDITIONAL([ARM], [test "x$cpu_family" = xarm])
 
 AM_CONDITIONAL([ENABLE_LARGE_TILES], [test "x$enable_large_tiles" = xyes])
 
@@ -405,6 +427,9 @@ AM_COND_IF([ASM], [
     ])
     AM_COND_IF([AARCH64], [
         AC_DEFINE(ARCH_AARCH64, 1, [targeting a 64-bit arm host architecture])
+    ])
+    AM_COND_IF([ARM], [
+        AC_DEFINE(ARCH_ARM, 1, [targeting a 32-bit arm host architecture])
     ])
 ], [
     AC_DEFINE(CONFIG_ASM, 0, [ASM enabled])

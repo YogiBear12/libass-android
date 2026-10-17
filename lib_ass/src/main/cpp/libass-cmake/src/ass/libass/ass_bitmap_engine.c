@@ -155,6 +155,10 @@ unsigned ass_get_cpu_flags(unsigned mask)
 
 #if ARCH_AARCH64
     flags = ASS_CPU_FLAG_ARM_NEON;
+#elif ARCH_ARM
+#if defined(__ARM_NEON)
+    flags = ASS_CPU_FLAG_ARM_NEON;
+#endif
 #endif
 
     return flags & mask;
@@ -191,6 +195,18 @@ BitmapEngine ass_bitmap_engine_init(unsigned mask)
     if (flags & ASS_CPU_FLAG_ARM_NEON) {
         ALL_PROTOTYPES(16, neon)
         ALL_FUNCTIONS(4, 16, neon)
+        return engine;
+    }
+#elif ARCH_ARM
+    ALL_FUNCTIONS(4, 16, c)
+    if (flags & ASS_CPU_FLAG_ARM_NEON) {
+        ALL_PROTOTYPES(16, neon)
+        RASTERIZER_FUNCTIONS(neon)
+        GENERIC_FUNCTION(add_bitmaps, neon)
+        GENERIC_FUNCTION(imul_bitmaps, neon)
+        GENERIC_FUNCTION(mul_bitmaps, neon)
+        GENERIC_FUNCTION(be_blur, neon)
+        BLUR_FUNCTIONS(4, 16, neon)
         return engine;
     }
 #endif
