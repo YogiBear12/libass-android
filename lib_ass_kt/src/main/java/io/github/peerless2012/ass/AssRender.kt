@@ -1,5 +1,6 @@
 package io.github.peerless2012.ass
 
+import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -31,6 +32,17 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
 
         @JvmStatic
         external fun nativeAssRenderFrame(render: Long, track: Long, time: Long, type: Int): AssFrame?
+
+        // Must match the CANVAS_RESULT_* enum on the native side.
+        const val CANVAS_RESULT_X = 0
+        const val CANVAS_RESULT_Y = 1
+        const val CANVAS_RESULT_WIDTH = 2
+        const val CANVAS_RESULT_HEIGHT = 3
+        const val CANVAS_RESULT_CHANGED = 4
+        const val CANVAS_RESULT_FIELD_COUNT = 5
+
+        @JvmStatic
+        external fun nativeAssRenderCanvasInto(render: Long, track: Long, time: Long, width: Int, height: Int, force: Boolean, buffer: ByteBuffer, result: IntArray)
 
         @JvmStatic
         external fun nativeAssRenderDeinit(render: Long)
@@ -85,6 +97,20 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
             if (t.released || t.nativeAssTrack == 0L) return null
             t.drainPendingChunks()
             return nativeAssRenderFrame(nativeRender, t.nativeAssTrack, time, type.ordinal)
+        }
+    }
+
+    /** Writes packed RGBA from offset zero and fills [result] at the `CANVAS_RESULT_*` indices. */
+    public fun renderCanvasInto(time: Long, width: Int, height: Int, force: Boolean, buffer: ByteBuffer, result: IntArray): Boolean {
+        lock.withLock {
+            if (released || nativeRender == 0L) return false
+            val t = track ?: return false
+            if (t.released || t.nativeAssTrack == 0L) return false
+            t.drainPendingChunks()
+            require(!buffer.isReadOnly) { "Buffer must be writable" }
+            nativeAssRenderSetFrameSize(nativeRender, width, height)
+            nativeAssRenderCanvasInto(nativeRender, t.nativeAssTrack, time, width, height, force, buffer, result)
+            return true
         }
     }
 

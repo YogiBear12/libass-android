@@ -8,11 +8,22 @@
 #include <string.h>
 #include <jni.h>
 #include "ass/ass.h"
+#include "AssCanvas.h"
 #include "fontconfig/fontconfig.h"
 #include "GLES2/gl2.h"
 #include "GLES2/gl2ext.h"
 
 #define LOG_TAG "SubtitleRenderer"
+
+// Must match the CANVAS_RESULT_* constants on the Kotlin side.
+enum {
+    CANVAS_RESULT_X,
+    CANVAS_RESULT_Y,
+    CANVAS_RESULT_WIDTH,
+    CANVAS_RESULT_HEIGHT,
+    CANVAS_RESULT_CHANGED,
+    CANVAS_RESULT_FIELD_COUNT
+};
 
 void assMessageCallback(int level, const char *fmt, va_list args, void *data) {
     if (level > 4) return;
@@ -355,6 +366,36 @@ jobject nativeAssRenderFrame(JNIEnv* env, jclass clazz, jlong render, jlong trac
     return (*env)->NewObject(env, assFrameClass, assFrameConstructor, assTexArr, changed);
 }
 
+static void throwIllegalArgument(JNIEnv *env, const char *message) {
+    (*env)->ThrowNew(env, (*env)->FindClass(env, "java/lang/IllegalArgumentException"), message);
+}
+
+void nativeAssRenderCanvasInto(JNIEnv* env, jclass clazz, jlong render, jlong track, jlong time,
+                              jint width, jint height, jboolean force, jobject buffer, jintArray result) {
+    void *rgba = buffer ? (*env)->GetDirectBufferAddress(env, buffer) : NULL;
+    jlong capacity = buffer ? (*env)->GetDirectBufferCapacity(env, buffer) : -1;
+    if (!rgba || capacity < 0 || !result || (*env)->GetArrayLength(env, result) < CANVAS_RESULT_FIELD_COUNT) {
+        throwIllegalArgument(env, "Expected a direct buffer and a canvas result array");
+        return;
+    }
+    jint values[CANVAS_RESULT_FIELD_COUNT] = { [CANVAS_RESULT_CHANGED] = 1 };
+    if (render && track && width > 0 && height > 0) {
+        int changed;
+        ASS_Image *images = ass_render_frame((ASS_Renderer *) render, (ASS_Track *) track, time, &changed);
+        CanvasBox box = canvas_box(images, width, height);
+        if (canvas_into(images, box, changed, force, rgba, (size_t) capacity) < 0) {
+            throwIllegalArgument(env, "Direct buffer is too small for the canvas");
+            return;
+        }
+        values[CANVAS_RESULT_X] = box.x;
+        values[CANVAS_RESULT_Y] = box.y;
+        values[CANVAS_RESULT_WIDTH] = box.w;
+        values[CANVAS_RESULT_HEIGHT] = box.h;
+        values[CANVAS_RESULT_CHANGED] = changed;
+    }
+    (*env)->SetIntArrayRegion(env, result, 0, CANVAS_RESULT_FIELD_COUNT, values);
+}
+
 void nativeAssRenderDeinit(JNIEnv* env, jclass clazz, jlong render) {
     if (render) {
         ass_renderer_done((ASS_Renderer *) render);
@@ -368,6 +409,7 @@ static JNINativeMethod renderMethodTable[] = {
         {"nativeAssRenderSetStorageSize", "(JII)V", (void*) nativeAssRenderSetStorageSize},
         {"nativeAssRenderSetFrameSize", "(JII)V", (void*)nativeAssRenderSetFrameSize},
         {"nativeAssRenderFrame", "(JJJI)Lio/github/peerless2012/ass/AssFrame;", (void*) nativeAssRenderFrame},
+        {"nativeAssRenderCanvasInto", "(JJJIIZLjava/nio/ByteBuffer;[I)V", (void*) nativeAssRenderCanvasInto},
         {"nativeAssRenderDeinit", "(J)V", (void*)nativeAssRenderDeinit},
 };
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
