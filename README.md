@@ -1,39 +1,42 @@
 # libass-android
-[![ass - Version](https://img.shields.io/maven-central/v/io.github.peerless2012/ass?label=ass)](https://central.sonatype.com/artifact/io.github.peerless2012/ass)
-[![ass-kt - Version](https://img.shields.io/maven-central/v/io.github.peerless2012/ass-kt?label=ass-kt)](https://central.sonatype.com/artifact/io.github.peerless2012/ass-kt)
-[![ass-media - Version](https://img.shields.io/maven-central/v/io.github.peerless2012/ass-media?label=ass-media)](https://central.sonatype.com/artifact/io.github.peerless2012/ass-media)
 
-A collection of libraries for implementing [libass](https://github.com/libass/libass) for Android.
+A fork of [libass-android](https://github.com/peerless2012/libass-android) by peerless2012, which
+wraps [libass](https://github.com/libass/libass) for Android. This fork optimizes rendering for
+Android TV, where most devices run a 32-bit ARM userspace on slow cores.
 
-It use [libass-cmake](https://github.com/peerless2012/libass-cmake) to build libass.
+## Patches
 
-## Modules
-### [lib_ass](./lib_ass)
-A native build library with prefab feature, this module contains libass.so and the header files.
+Build:
 
-App want to use libass in C/C++ can use this module.
+- NDK 28.2. The autotools dependencies (libass, FriBidi, libunibreak, Fontconfig, Expat) build at
+  `-O2`; upstream builds them at `-O0`.
+- libass is rebuilt on every build and linked as an imported archive, so source edits always reach
+  the AAR.
+- `bootstrap.sh` generates the autotools files after cloning.
 
-### [lib_ass_kt](./lib_ass_kt)
-A kotlin wrapper for libass native api. 
+libass:
 
-App want to use libass in java/kotlin can use this module. 
+- On armv7, the cache lookup avoids 64-bit division and `ass_lrint` compiles to one `vcvtr`.
+- Glyph runs that cannot reach the frame are skipped before rasterizing.
+- The NEON kernels are enabled on 32-bit ARM.
+- Parsed override tags are cached by event text.
 
-### [lib_ass_media](./lib_ass_media)
-A media3 extend library for libass.
+`lib_ass_kt` and `lib_ass_media`:
 
-App use media3 can use this module to add ass for your player.
+- Subtitle chunks are queued while a render holds the lock, so loading never waits on rendering.
+- A frame is blended on the CPU into one premultiplied RGBA canvas instead of one texture per image.
+- The overlay views render that canvas on a worker thread.
 
-## Who is using
-| Icon                                      | Name   |
-|------------------------------------------|--------|
-| <img src="https://github.com/FongMi/TV/blob/fongmi/app/src/main/res/mipmap-hdpi/ic_launcher.png?raw=true" alt="影視TV" width="50" /> | [影視TV](https://github.com/FongMi/TV)  |
-| <img src="https://github.com/user-attachments/assets/e9b4d86b-6ce8-4550-bde2-bdf9a3818644" alt="AfuseKt" width="50" /> | [AfuseKt](https://github.com/AttemptD/AfuseKt-release)  |
-| <img src="https://avatars.githubusercontent.com/u/45698031" alt="Jellyfin Android TV" width="50"> | [Jellyfin Android TV](https://github.com/jellyfin/jellyfin-androidtv) |
-| <img src="https://avatars.githubusercontent.com/u/181620197" alt="Fladder" width="50"> | [Fladder](https://github.com/DonutWare/Fladder) |
-| <img src="https://avatars.githubusercontent.com/u/267417830" alt="NuvioTV" width="50"> | [NuvioTV](https://github.com/NuvioMedia/NuvioTV) |
+The existing `ass-kt` and `ass-media` APIs are unchanged; the canvas render is an addition.
 
-## Issue
-If you have issue when use, [create](https://github.com/peerless2012/libass-android/issues/new) an issue.
+## Build
 
-## PR
-If you want to fix or add feature, [create](https://github.com/peerless2012/libass-android/compare) a pr.
+Needs autoconf, automake, libtool, autopoint, gperf, pkg-config, the Android SDK with CMake
+3.22.1, and NDK 28.2.13676358.
+
+```
+./bootstrap.sh
+./gradlew :lib_ass_kt:assembleRelease :lib_ass_media:assembleRelease
+```
+
+The AARs land in `lib_ass_kt/build/outputs/aar/` and `lib_ass_media/build/outputs/aar/`.
