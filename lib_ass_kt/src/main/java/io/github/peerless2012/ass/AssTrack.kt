@@ -46,6 +46,10 @@ class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
     var released = false
         private set
 
+    private val chunks = AssChunkQueue(lock, { released || nativeAssTrack == 0L }) { start, duration, array, offset, length ->
+        nativeAssTrackReadChunk(nativeAssTrack, start, duration, array, offset, length)
+    }
+
     public fun getWidth(): Int {
         lock.withLock {
             if (released || nativeAssTrack == 0L) return 0
@@ -63,12 +67,14 @@ class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
     public fun getEvents(): Array<AssEvent>? {
         lock.withLock {
             if (released || nativeAssTrack == 0L) return null
+            drainPendingChunks()
             return nativeAssTrackGetEvents(nativeAssTrack)
         }
     }
 
     public fun clearEvent() {
         lock.withLock {
+            chunks.clear()
             if (released || nativeAssTrack == 0L) return
             nativeAssTrackClearEvents(nativeAssTrack)
         }
@@ -77,21 +83,24 @@ class AssTrack(private val ass: Long, private val lock: ReentrantLock) {
     public fun readBuffer(array: ByteArray, offset: Int = 0, length : Int = array.size) {
         lock.withLock {
             if (released || nativeAssTrack == 0L) return
+            drainPendingChunks()
             nativeAssTrackReadBuffer(nativeAssTrack, array, offset, length)
         }
     }
 
     public fun readChunk(start: Long, duration: Long, array: ByteArray, offset: Int = 0, length: Int = array.size) {
-        lock.withLock {
-            if (released || nativeAssTrack == 0L) return
-            nativeAssTrackReadChunk(nativeAssTrack, start, duration, array, offset, length)
-        }
+        chunks.readChunk(start, duration, array, offset, length)
+    }
+
+    internal fun drainPendingChunks() {
+        chunks.drain()
     }
 
     fun release() {
         lock.withLock {
             if (released) return
             released = true
+            chunks.clear()
             if (nativeAssTrack != 0L) {
                 nativeAssTrackDeinit(nativeAssTrack)
                 nativeAssTrack = 0

@@ -83,6 +83,7 @@ class AssRender(nativeAss: Long, private val lock: ReentrantLock) {
             if (released || nativeRender == 0L) return null
             val t = track ?: return null
             if (t.released || t.nativeAssTrack == 0L) return null
+            t.drainPendingChunks()
             return nativeAssRenderFrame(nativeRender, t.nativeAssTrack, time, type.ordinal)
         }
     }
