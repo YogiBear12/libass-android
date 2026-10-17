@@ -145,24 +145,40 @@ typedef struct {
     int16_t coeff[8];
 } BlurMethod;
 
-static void find_best_method(BlurMethod *blur, double r2)
+static double find_level_radius(BlurMethod *blur, double r2)
 {
-    double mu[8];
     if (r2 < 0.5) {
         blur->level = 0;
         blur->radius = 4;
+        return 0;
+    }
+    double frac = frexp(sqrt(0.11569 * r2 + 0.20591047), &blur->level);
+    double mul = pow(0.25, blur->level);
+    blur->radius = 8 - (int) ((10.1525 + 0.8335 * mul) * (1 - frac));
+    blur->radius = FFMAX(blur->radius, 4);
+    return mul;
+}
+
+static void find_best_method(BlurMethod *blur, double r2)
+{
+    double mu[8];
+    double mul = find_level_radius(blur, r2);
+    if (r2 < 0.5) {
         mu[1] = 0.085 * r2 * r2 * r2;
         mu[0] = 0.5 * r2 - 4 * mu[1];
         mu[2] = mu[3] = 0;
     } else {
-        double frac = frexp(sqrt(0.11569 * r2 + 0.20591047), &blur->level);
-        double mul = pow(0.25, blur->level);
-        blur->radius = 8 - (int) ((10.1525 + 0.8335 * mul) * (1 - frac));
-        blur->radius = FFMAX(blur->radius, 4);
         calc_coeff(mu, blur->radius, r2, mul);
     }
     for (int i = 0; i < blur->radius; i++)
         blur->coeff[i] = (int) (0x10000 * mu[i] + 0.5);
+}
+
+int ass_gaussian_blur_padding(double r2)
+{
+    BlurMethod blur;
+    find_level_radius(&blur, r2);
+    return ((blur.radius + 4) << blur.level) - 4;
 }
 
 /**

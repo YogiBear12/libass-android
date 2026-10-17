@@ -2471,6 +2471,53 @@ static double restore_blur(int qblur)
     return sigma * sigma;
 }
 
+int ass_be_padding(int be);
+
+// The area a run's glyph must overlap to change the frame, once blur and shadow spread it.
+static ASS_Rect frame_reach(const ASS_Renderer *render_priv, const FilterDesc *filter)
+{
+    int32_t pad_x = ass_be_padding(filter->be) + abs(filter->shadow.x >> 6) + 1;
+    int32_t pad_y = ass_be_padding(filter->be) + abs(filter->shadow.y >> 6) + 1;
+    double r2x = restore_blur(filter->blur_x);
+    double r2y = restore_blur(filter->blur_y);
+    if (r2x > 0.001 || r2y > 0.001) {
+        pad_x += ass_gaussian_blur_padding(r2x);
+        pad_y += ass_gaussian_blur_padding(r2y);
+    }
+    return (ASS_Rect) {
+        .x_min = -pad_x, .y_min = -pad_y,
+        .x_max = render_priv->width + pad_x, .y_max = render_priv->height + pad_y,
+    };
+}
+
+static bool bitmap_overlaps(const Bitmap *bm, ASS_Vector pos, const ASS_Rect *rect)
+{
+    if (!bm)
+        return false;
+    int32_t x = pos.x + bm->left, y = pos.y + bm->top;
+    return x < rect->x_max && y < rect->y_max &&
+        x + bm->w > rect->x_min && y + bm->h > rect->y_min;
+}
+
+static bool run_reaches(const CombinedBitmapInfo *info, const ASS_Rect *rect)
+{
+    for (int j = 0; j < info->bitmap_count; j++)
+        if (bitmap_overlaps(info->bitmaps[j].bm, info->bitmaps[j].pos, rect) ||
+                bitmap_overlaps(info->bitmaps[j].bm_o, info->bitmaps[j].pos_o, rect))
+            return true;
+    return false;
+}
+
+// Skip only whole runs so a partly visible run keeps its composite cache key and output is unchanged.
+static bool run_offscreen(const ASS_Renderer *render_priv, const CombinedBitmapInfo *info)
+{
+    ASS_Rect frame = { 0, 0, render_priv->width, render_priv->height };
+    if (run_reaches(info, &frame))
+        return false;
+    ASS_Rect reach = frame_reach(render_priv, &info->filter);
+    return !run_reaches(info, &reach);
+}
+
 // Convert glyphs to bitmaps, combine them, apply blur, generate shadows.
 static void render_and_combine_glyphs(RenderContext *state,
                                       double device_x, double device_y)
@@ -2601,6 +2648,12 @@ static void render_and_combine_glyphs(RenderContext *state,
         if (info->effect_type == EF_KARAOKE_KF)
             info->effect_timing = lround(d6_to_double(info->leftmost_x) +
                 d6_to_double(info->effect_timing) * render_priv->par_scale_x);
+
+        if (run_offscreen(render_priv, info)) {
+            free(info->bitmaps);
+            info->bitmap_count = 0;
+            continue;
+        }
 
         for (int j = 0; j < info->bitmap_count; j++) {
             info->bitmaps[j].pos.x -= info->x;
