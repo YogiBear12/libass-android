@@ -13,14 +13,14 @@ import android.os.Message
 import android.util.AttributeSet
 import android.util.Log
 import android.view.TextureView
-import androidx.annotation.WorkerThread
 import androidx.media3.common.C
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
-import io.github.peerless2012.ass.AssTexType
 import io.github.peerless2012.ass.media.AssHandler
+import io.github.peerless2012.ass.media.executor.BYTES_PER_PIXEL
+import io.github.peerless2012.ass.media.executor.createOverlayWorker
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -52,27 +52,17 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
         surfaceTextureListener = this
     }
 
-    interface Renderer {
-        @WorkerThread
-        fun onSurfaceCreated()
-        @WorkerThread
-        fun onSurfaceChanged(width: Int, height: Int)
-        @WorkerThread
-        fun onDrawFrame(timestampNanos: Long): Boolean
-        @WorkerThread
-        fun onSurfaceDestroyed()
-    }
-
+    @Volatile
     private var renderThread: AssRenderThread? = null
 
-    override fun requestRender(timestampNanos: Long) {
-        renderThread?.requestRender(timestampNanos)
+    override fun requestRender(timeUs: Long, force: Boolean) {
+        renderThread?.requestRender(timeUs, force)
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        AssRenderThread(surface, width, height, AssRender(assHandler)).also {
-            renderThread = it
+        AssRenderThread(surface, width, height, assHandler).also {
             it.start()
+            renderThread = it
         }
     }
 
@@ -83,7 +73,20 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
         renderThread?.release()
         renderThread = null
-        return true
+        // The GL thread owns the SurfaceTexture until EGL teardown completes.
+        return false
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        assHandler.renderCallback = { requestRender(assHandler.videoTime, true) }
+    }
+
+    override fun onDetachedFromWindow() {
+        assHandler.renderCallback = null
+        renderThread?.release()
+        renderThread = null
+        super.onDetachedFromWindow()
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
@@ -97,7 +100,7 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
         private val surfaceTexture: SurfaceTexture,
         private var width: Int,
         private var height: Int,
-        private val render: Renderer
+        assHandler: AssHandler
     ) : HandlerThread("AssTexRenderThread"), Handler.Callback {
 
         private val TAG = "AssTexRenderThread"
@@ -109,10 +112,15 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
 
         private lateinit var handler: Handler
 
+        @Volatile
+        private var stopping = false
+
+        private var released = false
+
         private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
         private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
-        private var lastDrawTimestampNanos: Long = 0L
+        private val render = AssRender(assHandler) { requestDraw() }
 
         override fun start() {
             super.start()
@@ -120,9 +128,14 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
             handler.sendEmptyMessage(MSG_INIT)
         }
 
-        fun requestRender(timestampNanos: Long) {
+        fun requestRender(timeUs: Long, force: Boolean) {
+            render.requestRender(timeUs, force)
+        }
+
+        private fun requestDraw() {
+            if (stopping) return
             handler.removeMessages(MSG_DRAW)
-            handler.obtainMessage(MSG_DRAW, timestampNanos).sendToTarget()
+            handler.sendEmptyMessage(MSG_DRAW)
         }
 
         fun onSurfaceSizeChanged(width: Int, height: Int) {
@@ -132,14 +145,19 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
         }
 
         fun release() {
+            if (stopping) return
+            stopping = true
+            render.stopWorker()
+            handler.removeCallbacksAndMessages(null)
             handler.sendEmptyMessage(MSG_RELEASE)
         }
 
         override fun handleMessage(msg: Message): Boolean {
+            if (stopping && msg.what != MSG_RELEASE) return true
             try {
                 when (msg.what) {
                     MSG_INIT -> initInternal()
-                    MSG_DRAW -> drawInternal(msg.obj as Long)
+                    MSG_DRAW -> drawInternal()
                     MSG_SURFACE_SIZE_CHANGED -> sizeChangedInternal(width, height)
                     MSG_RELEASE -> releaseInternal()
                 }
@@ -170,40 +188,42 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
                 GlUtil.clearFocusedBuffers()
                 EGL14.eglSwapBuffers(eglDisplay, eglSurface)
             }
-            if (lastDrawTimestampNanos != 0L) {
-                drawInternal(lastDrawTimestampNanos)
-            }
         }
 
-        private fun drawInternal(timestampNanos: Long) {
-            lastDrawTimestampNanos = timestampNanos
+        private fun drawInternal() {
             if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
-            if (render.onDrawFrame(timestampNanos)) {
-                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
-            }
+            render.onDrawFrame { EGL14.eglSwapBuffers(eglDisplay, eglSurface) }
         }
 
         private fun releaseInternal() {
-            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                try {
-                    render.onSurfaceDestroyed()
-                    GlUtil.destroyEglSurface(eglDisplay, eglSurface)
-                    GlUtil.destroyEglContext(eglDisplay, eglContext)
-                } catch (e: GlUtil.GlException) {
-                    Log.e(TAG, "Failed to release EGL resources", e)
-                } finally {
-                    eglDisplay = EGL14.EGL_NO_DISPLAY
-                    eglContext = EGL14.EGL_NO_CONTEXT
-                    eglSurface = EGL14.EGL_NO_SURFACE
+            if (released) return
+            released = true
+            stopping = true
+            render.stopWorker()
+            try {
+                if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                    try {
+                        render.onSurfaceDestroyed()
+                        GlUtil.destroyEglSurface(eglDisplay, eglSurface)
+                        GlUtil.destroyEglContext(eglDisplay, eglContext)
+                    } catch (e: GlUtil.GlException) {
+                        Log.e(TAG, "Failed to release EGL resources", e)
+                    } finally {
+                        eglDisplay = EGL14.EGL_NO_DISPLAY
+                        eglContext = EGL14.EGL_NO_CONTEXT
+                        eglSurface = EGL14.EGL_NO_SURFACE
+                    }
                 }
+            } finally {
+                surfaceTexture.release()
+                quit()
             }
-            quit()
         }
     }
 
-    private class AssRender(private val assHandler: AssHandler) : Renderer {
+    private class AssRender(private val assHandler: AssHandler, published: () -> Unit) {
 
-        private val TAG = "AssRender"
+        private val worker = createOverlayWorker(assHandler, published)
 
         private val vertexShaderCode = """
             attribute vec4 a_Position;
@@ -215,15 +235,20 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
             }
         """.trimIndent()
 
-        // alpha
         private val fragmentShaderCode = """
+            #ifdef GL_FRAGMENT_PRECISION_HIGH
+            precision highp float;
+            #else
             precision mediump float;
+            #endif
             varying vec2 v_TexCoord;
             uniform sampler2D u_Texture;
-            uniform vec4 u_Color;
+            uniform vec2 u_TextureScale;
+            uniform vec2 u_TextureMargin;
             void main() {
-                float alpha = texture2D(u_Texture, v_TexCoord).a;
-                gl_FragColor = vec4(u_Color.rgb, u_Color.a * alpha);
+                vec2 coord = clamp(v_TexCoord * u_TextureScale,
+                    u_TextureMargin, u_TextureScale - u_TextureMargin);
+                gl_FragColor = texture2D(u_Texture, coord);
             }
         """.trimIndent()
 
@@ -243,10 +268,9 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
 
         private var surfaceDirty = true
 
-        private var forceNextRender = false
-
         private var surfaceSize = Size.ZERO
 
+        @Volatile
         private var renderSize = Size.ZERO
 
         private lateinit var glProgram: GlProgram
@@ -255,20 +279,23 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
 
         private var texCoordBufferId = 0
 
-        // Whether GL_EXT_unpack_subimage is supported.
-        // When supported, native createTexture can use GL_UNPACK_ROW_LENGTH_EXT directly.
-        // Otherwise, fallback to bitmap upload on the Kotlin side.
-        private var useNativeTexture = false
+        private var textureId = 0
 
-        override fun onSurfaceCreated() {
-            // Detect GL_EXT_unpack_subimage support.
-            // Native createTexture relies on this extension for stride-aware texture upload.
-            // On GPUs that don't support it (e.g. Mali-470), fallback to bitmap mode.
-            val extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS) ?: ""
-            useNativeTexture = "GL_EXT_unpack_subimage" in extensions
-            if (!useNativeTexture) {
-                Log.w(TAG, "GL_EXT_unpack_subimage not supported, fallback to bitmap texture upload")
-            }
+        private var textureWidth = 0
+
+        private var textureHeight = 0
+
+        fun onSurfaceCreated() {
+            val textures = IntArray(1)
+            GLES20.glGenTextures(1, textures, 0)
+            textureId = textures[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            textureWidth = 0
+            textureHeight = 0
 
             glProgram = GlProgram(vertexShaderCode, fragmentShaderCode)
             GlUtil.checkGlError()
@@ -295,99 +322,102 @@ class AssSubtitleTextureView : TextureView, AssSubtitleRender, TextureView.Surfa
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, texCoordBufferId)
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, textureCoords.size * 4, texCordBuffer, GLES20.GL_STATIC_DRAW)
             GlUtil.checkGlError()
-            // ALPHA_8 need set pixel store to 1
-            // Or the render result may error or crash
+            // Canvas rows are tightly packed; no row-length extension is needed.
             GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
 
             // enable blend
             GLES20.glEnable(GLES20.GL_BLEND)
-            // set blend mode
-            GLES20.glBlendFuncSeparate(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         }
 
-        override fun onSurfaceChanged(width: Int, height: Int) {
+        fun onSurfaceChanged(width: Int, height: Int) {
             surfaceSize = Size(width, height)
             renderSize = assHandler.computeRenderSize(width, height)
-            assHandler.render?.setFrameSize(renderSize.width, renderSize.height)
             GLES20.glViewport(0, 0, width, height)
-            forceNextRender = true
+            requestRender(assHandler.videoTime, assHandler.render != null)
         }
 
-        override fun onDrawFrame(timestampNanos: Long): Boolean {
-            val texType = if (useNativeTexture) AssTexType.TEXTURE else AssTexType.BITMAP_ALPHA
-            val assFrame = assHandler.render?.renderFrame(timestampNanos / 1000, texType)
+        fun requestRender(timeUs: Long, force: Boolean) {
+            if (!force && assHandler.render == null) return
+            val size = renderSize
+            worker.request(timeUs, size.width, size.height, force)
+        }
 
-            // if content not change, just return the tex
-            val force = forceNextRender
-            forceNextRender = false
-            if (assFrame != null && assFrame.changed == 0 && !force) {
-                return false
-            }
+        fun stopWorker() {
+            worker.shutdown()
+        }
 
-            // no content && tex is clean, just return the tex
-            if (assFrame == null && !surfaceDirty) {
-                return false
-            }
-
-            // clear surface content
-            GlUtil.clearFocusedBuffers()
-            surfaceDirty = false
-
-            // render each frame
-            assFrame?.images?.let { frames ->
-                surfaceDirty = true
-                glProgram.use()
-                val aPosition = glProgram.getAttributeArrayLocationAndEnable("a_Position")
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId)
-                GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, 0)
-                GlUtil.checkGlError()
-                val aTexCoord = glProgram.getAttributeArrayLocationAndEnable("a_TexCoord")
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, texCoordBufferId)
-                GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, 0)
-                GlUtil.checkGlError()
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-
-                frames.forEach { frame ->
-                    // Resolve texture id based on the render mode
-                    val texId = if (useNativeTexture) {
-                        frame.tex
-                    } else {
-                        frame.bitmap?.let { GlUtil.createTexture(it) } ?: 0
+        fun onDrawFrame(swap: () -> Unit) {
+            val canvas = worker.acquire() ?: return
+            try {
+                if (canvas.renderWidth != renderSize.width || canvas.renderHeight != renderSize.height) return
+                if (canvas.width == 0 && !surfaceDirty) return
+                // clear surface content
+                GlUtil.clearFocusedBuffers()
+                surfaceDirty = false
+                if (canvas.width > 0 && canvas.height > 0) {
+                    val buffer = canvas.buffer
+                    buffer.position(0)
+                    buffer.limit(canvas.width * canvas.height * BYTES_PER_PIXEL)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+                    if (canvas.width > textureWidth || canvas.height > textureHeight) {
+                        textureWidth = maxOf(textureWidth, canvas.width)
+                        textureHeight = maxOf(textureHeight, canvas.height)
+                        GLES20.glTexImage2D(
+                            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, textureWidth, textureHeight,
+                            0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+                        )
                     }
+                    GLES20.glTexSubImage2D(
+                        GLES20.GL_TEXTURE_2D, 0, 0, 0, canvas.width, canvas.height,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+                    )
+                    GlUtil.checkGlError()
 
-                    if (texId > 0) {
-                        val r = frame.color shr 24 and 0xFF
-                        val g = frame.color shr 16 and 0xFF
-                        val b = frame.color shr 8 and 0xFF
-                        val a = 0xFF - frame.color and 0xFF
+                    glProgram.use()
+                    GLES20.glUniform1i(glProgram.getUniformLocation("u_Texture"), 0)
+                    GLES20.glUniform2f(
+                        glProgram.getUniformLocation("u_TextureScale"),
+                        canvas.width.toFloat() / textureWidth, canvas.height.toFloat() / textureHeight
+                    )
+                    // Linear filtering must not sample stale pixels outside the uploaded box.
+                    GLES20.glUniform2f(
+                        glProgram.getUniformLocation("u_TextureMargin"),
+                        0.5f / textureWidth, 0.5f / textureHeight
+                    )
+                    val aPosition = glProgram.getAttributeArrayLocationAndEnable("a_Position")
+                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vertexBufferId)
+                    GLES20.glVertexAttribPointer(aPosition, 2, GLES20.GL_FLOAT, false, 0, 0)
+                    val aTexCoord = glProgram.getAttributeArrayLocationAndEnable("a_TexCoord")
+                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, texCoordBufferId)
+                    GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, 0)
+                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
 
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-                        GlUtil.checkGlError()
-
-                        // Scale coordinates from render size to surface size
-                        val scaleX = surfaceSize.width.toFloat() / renderSize.width
-                        val scaleY = surfaceSize.height.toFloat() / renderSize.height
-                        val scaledX = (frame.x * scaleX).toInt()
-                        val scaledY = (frame.y * scaleY).toInt()
-                        val scaledW = (frame.w * scaleX).toInt()
-                        val scaledH = (frame.h * scaleY).toInt()
-                        GLES20.glViewport(scaledX, surfaceSize.height - scaledY - scaledH, scaledW, scaledH)
-                        GLES20.glUniform4f(glProgram.getUniformLocation("u_Color"), r / 255f, g / 255f, b / 255f, a / 255f)
-
-                        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                        GlUtil.checkGlError()
-
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
-                        GlUtil.deleteTexture(texId)
-                    }
+                    // Scale coordinates from render size to surface size
+                    val scaleX = surfaceSize.width.toFloat() / renderSize.width
+                    val scaleY = surfaceSize.height.toFloat() / renderSize.height
+                    val scaledX = (canvas.x * scaleX).toInt()
+                    val scaledY = (canvas.y * scaleY).toInt()
+                    val scaledW = (canvas.width * scaleX).toInt()
+                    val scaledH = (canvas.height * scaleY).toInt()
+                    GLES20.glViewport(scaledX, surfaceSize.height - scaledY - scaledH, scaledW, scaledH)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                    GlUtil.checkGlError()
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+                    surfaceDirty = true
                 }
+                GLES20.glViewport(0, 0, surfaceSize.width, surfaceSize.height)
+                swap()
+            } finally {
+                worker.release(canvas)
             }
-            GLES20.glViewport(0, 0, surfaceSize.width, surfaceSize.height)
-            return true
         }
 
-        override fun onSurfaceDestroyed() {
+        fun onSurfaceDestroyed() {
+            GlUtil.deleteTexture(textureId)
+            textureId = 0
             GlUtil.deleteBuffer(vertexBufferId)
             GlUtil.deleteBuffer(texCoordBufferId)
             if (::glProgram.isInitialized) {

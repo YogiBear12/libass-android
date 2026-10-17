@@ -22,8 +22,6 @@ class AssExecutor(private val render: AssRender) {
 
     private var executorBusy = false
 
-    private val task = AssTask(render)
-
     public fun renderFrame(presentationTimeUs: Long, type: AssTexType): AssFrame? {
         var assFrame: AssFrame? = null
         if (executorBusy) {
@@ -54,19 +52,6 @@ class AssExecutor(private val render: AssRender) {
         }
         lastFrame = null
         return assFrame
-    }
-
-    public fun asyncRenderFrame(presentationTimeUs: Long, type: AssTexType, callback: (AssFrame?) -> Unit) {
-        if (task.executorBusy) {
-            // render thread is busy, keep last content
-            callback.invoke(assFrameNotChange)
-        } else {
-            task.presentationTimeUs = presentationTimeUs
-            task.callback = callback
-            task.type = type
-            // execute render task
-            executor.execute(task)
-        }
     }
 
     public fun shutdown() {

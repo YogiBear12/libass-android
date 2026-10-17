@@ -8,6 +8,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.MimeTypes.TEXT_SSA
 import androidx.media3.common.Player.Listener
+import androidx.media3.common.Player.PositionInfo
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.Size
@@ -19,6 +20,7 @@ import io.github.peerless2012.ass.Ass
 import io.github.peerless2012.ass.media.parser.AssHeaderParser
 import io.github.peerless2012.ass.media.render.AssOverlayManager
 import io.github.peerless2012.ass.media.type.AssRenderType
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Handles ASS subtitle rendering and integration with ExoPlayer.
@@ -39,15 +41,18 @@ class AssHandler(
     val ass by assDelegate
 
     /** The current ASS renderer. It's created as soon as a ASS track is detected. */
+    @Volatile
     var render: AssRender? = null
         private set
 
     /**
      * AssRender changed callback
      */
+    @Volatile
     var renderCallback: ((AssRender?) -> Unit)? = null
 
     /** The currently selected ASS track. */
+    @Volatile
     var track: AssTrack? = null
         private set
 
@@ -70,12 +75,19 @@ class AssHandler(
 
     private var videoFrameIndex = 0
 
+    private val forceNextRender = AtomicBoolean()
+
+    @Volatile
     var videoTime = -1L
         set(value) {
-            if (field == value) {
+            // A paused seek may deliver its one new timestamp before the flag is set, so a pending
+            // force must fire even when the time has not changed.
+            val force = forceNextRender.getAndSet(false)
+            if (field == value && !force) {
                 return
             }
             field = value
+            if (force) renderCallback?.invoke(render)
             if (videoFrameIndex == 0) {
                 videoTimeCallback?.invoke(value)
             }
@@ -144,6 +156,7 @@ class AssHandler(
             Log.i("AssHandler", "subtitle track disabled")
             track = null
             render?.setTrack(null)
+            renderCallback?.invoke(render)
             overlayManager?.disable()
             return
         }
@@ -165,7 +178,6 @@ class AssHandler(
         if (track == null || this.track == track) return
 
         Log.i("AssHandler", "subtitle track changed to $format")
-        this.track = track
         val render = requireNotNull(render)
         render.setStorageSize(videoSize.width, videoSize.height)
         if (renderType == AssRenderType.OVERLAY_CANVAS || renderType == AssRenderType.OVERLAY_OPEN_GL) {
@@ -176,6 +188,9 @@ class AssHandler(
             render.setFrameSize(renderSize.width, renderSize.height)
         }
         render.setTrack(track)
+        // Published after the renderer has it, so the overlay never sizes buffers for a track it cannot render.
+        this.track = track
+        renderCallback?.invoke(render)
 
         // Player func call need in create thread.
         overlayManager?.let {
@@ -201,6 +216,12 @@ class AssHandler(
             }
             render?.setFrameSize(renderSize.width, renderSize.height)
         }
+    }
+
+    override fun onPositionDiscontinuity(oldPosition: PositionInfo, newPosition: PositionInfo, reason: Int) {
+        super.onPositionDiscontinuity(oldPosition, newPosition, reason)
+        // videoTime still holds the pre-seek position here; the next clock update renders.
+        forceNextRender.set(true)
     }
 
     override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -360,11 +381,11 @@ class AssHandler(
     fun release() {
         videoTimeCallback = null
         overlayManager?.disable()
+        track = null
         render?.release()
         render = null
         availableTracks.values.forEach { it.release() }
         availableTracks.clear()
-        track = null
         pendingFonts.clear()
         if (assDelegate.isInitialized()) {
             ass.release()
