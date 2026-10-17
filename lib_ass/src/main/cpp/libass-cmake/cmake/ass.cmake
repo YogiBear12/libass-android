@@ -14,9 +14,16 @@ ExternalProject_Add(ep_ass
         --enable-fontconfig
         --enable-libunibreak
         --srcdir=<SOURCE_DIR>/<SOURCE_SUBDIR>
-    BUILD_COMMAND make
-    INSTALL_COMMAND make install
+    # Ninja restats the declared byproduct after the build step, so the install has to happen there
+    # or an unchanged stale archive prunes it.
+    BUILD_COMMAND make install
+    BUILD_ALWAYS TRUE
+    BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libass.a
+    INSTALL_COMMAND ""
 )
+add_library(ass_archive STATIC IMPORTED GLOBAL)
+set_target_properties(ass_archive PROPERTIES IMPORTED_LOCATION ${CMAKE_BINARY_DIR}/lib/libass.a)
+add_dependencies(ass_archive ep_ass)
 add_dependencies(ep_ass ep_freetype ep_harfbuzz ep_fribidi ep_unibreak)
 include_directories({CMAKE_BINARY_DIR}/include)
 link_directories({CMAKE_BINARY_DIR}/lib)
