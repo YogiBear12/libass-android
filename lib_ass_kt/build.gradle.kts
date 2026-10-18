@@ -74,5 +74,8 @@ mavenPublishing {
     publishToMavenCentral()
     // https://vanniktech.github.io/gradle-maven-publish-plugin/what/
     configure(AndroidSingleVariantLibrary())
-    signAllPublications()
+    // Local publishes for the app have no key; Maven Central releases do.
+    if (providers.gradleProperty("signingInMemoryKey").isPresent || providers.gradleProperty("signing.keyId").isPresent) {
+        signAllPublications()
+    }
 }
